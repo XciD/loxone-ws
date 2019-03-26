@@ -71,12 +71,14 @@ type LoxoneControl struct {
 	States     map[string]interface{} // Can be an array or a string
 }
 
+// LoxoneRoom represent a room
 type LoxoneRoom struct {
 	Name string
 	UUID string
 	Type int32
 }
 
+// LoxoneCategory represent a category
 type LoxoneCategory struct {
 	Name string
 	UUID string
@@ -168,6 +170,10 @@ func deserializeLoxoneResponse(jsonBytes *[]byte, class interface{}) (*LoxoneBod
 
 // Connect to the loxone websocket
 func Connect(host string, user string, password string) (*Loxone, error) {
+	if host == "" || user == "" || password == "" {
+		return nil, errors.New("missing host / user / password")
+	}
+
 	socket := createSocket(host)
 	socket.connect()
 
