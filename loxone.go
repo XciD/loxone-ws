@@ -54,9 +54,9 @@ type LoxoneConfig struct {
 	// OperatingModes of the loxone server
 	OperatingModes map[string]interface{}
 	// Rooms of the loxone server
-	Rooms map[string]interface{}
+	Rooms map[string]*LoxoneRoom
 	// Cats Categories of the loxone server
-	Cats map[string]interface{}
+	Cats map[string]*LoxoneCategory
 	// Controls all the control of the loxone server
 	Controls map[string]*LoxoneControl
 }
@@ -69,6 +69,18 @@ type LoxoneControl struct {
 	Room       string
 	Cat        string
 	States     map[string]interface{} // Can be an array or a string
+}
+
+type LoxoneRoom struct {
+	Name string
+	UUID string
+	Type int32
+}
+
+type LoxoneCategory struct {
+	Name string
+	UUID string
+	Type string
 }
 
 // Loxone The loxone object exposed
