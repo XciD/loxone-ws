@@ -1,4 +1,4 @@
-module github.com/xcid/loxone-websocket-golang
+module github.com/xcid/loxonews
 
         require (
         github.com/gorilla/websocket v1.4.0
