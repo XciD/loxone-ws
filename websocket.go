@@ -15,6 +15,7 @@ type loxoneWebsocket struct {
 	socket          *websocket.Conn
 	internalCmdChan chan *websocketResponse
 	events          chan *Event
+	disconnect      chan bool
 }
 
 type websocketResponse struct {
@@ -30,16 +31,18 @@ func createSocket(host string) *loxoneWebsocket {
 		host:            host,
 		url:             u,
 		internalCmdChan: make(chan *websocketResponse),
-		events:          make(chan *Event),
+		disconnect:      make(chan bool),
 	}
 }
 
-func (s *loxoneWebsocket) connect() error {
+func (s *loxoneWebsocket) connect(events chan *Event) error {
 	socket, _, err := websocket.DefaultDialer.Dial(s.url.String(), nil)
 	s.socket = socket
 	if err != nil {
 		return err
 	}
+
+	s.events = events
 
 	go s.listen()
 
@@ -55,6 +58,7 @@ func (s *loxoneWebsocket) listen() {
 		_, message, err := s.socket.ReadMessage()
 		if err != nil {
 			log.Error("read error:", err)
+			s.disconnect <- true
 			return
 		}
 		// Check if we received an header or not
@@ -74,12 +78,12 @@ func (s *loxoneWebsocket) listen() {
 				if incomingData.eventType == outofservice {
 					log.Warn("Miniserver out of service!")
 					incomingData = emptyHeader
-					// TODO Close
-					continue
+					s.disconnect <- true
+					break
 				}
 
 				if incomingData.eventType == keepalive {
-					// TODO Keep Alive
+					log.Debug("KeepAlive")
 					incomingData = emptyHeader
 					continue
 				}
@@ -125,6 +129,7 @@ func (s *loxoneWebsocket) handleBinaryEvent(binaryEvent *[]byte, eventType event
 }
 
 func (s *loxoneWebsocket) close() {
+	log.Warn("Closing Socket")
 	defer s.socket.Close()
 	err := s.socket.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	if err != nil {
@@ -135,9 +140,14 @@ func (s *loxoneWebsocket) close() {
 
 func (s *loxoneWebsocket) sendCmd(cmd *[]byte) (*websocketResponse, error) {
 	log.Debug("Sending commande to WS")
-	s.socket.WriteMessage(websocket.TextMessage, *cmd)
+	err := s.socket.WriteMessage(websocket.TextMessage, *cmd)
+
+	if err != nil {
+		return nil, err
+	}
+
 	log.Debug("Waiting for answer")
 	result := <-s.internalCmdChan
-	log.Debug("WS answered")
+	log.Debugf("WS answered")
 	return result, nil
 }

@@ -94,7 +94,8 @@ type Loxone struct {
 	encrypt  *encrypt
 	token    *loxoneToken
 	// Events received from the websockets
-	Events chan *Event
+	Events         chan *Event
+	registerEvents bool
 }
 
 type encrypt struct {
@@ -174,28 +175,73 @@ func Connect(host string, user string, password string) (*Loxone, error) {
 		return nil, errors.New("missing host / user / password")
 	}
 
-	socket := createSocket(host)
-	socket.connect()
-
 	loxone := &Loxone{
-		host:     host,
-		user:     user,
-		password: password,
-		socket:   socket,
-		Events:   socket.events,
+		host:           host,
+		user:           user,
+		password:       password,
+		registerEvents: false,
+		Events:         make(chan *Event),
 	}
 
-	err := loxone.authenticate()
+	err := loxone.connect()
 
 	if err != nil {
 		return nil, err
 	}
 
+	// Handle disconnect
+	go loxone.handleReconnect()
+
 	return loxone, nil
+}
+
+func (l *Loxone) connect() error {
+	l.socket = createSocket(l.host)
+	err := l.socket.connect(l.Events)
+
+	if err != nil {
+		return err
+	}
+
+	err = l.authenticate()
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (l *Loxone) handleReconnect() {
+	// If we finish, we restart a reconnect loop
+	select {
+	case _ = <-l.socket.disconnect:
+		for {
+			log.Warn("Disconnected, reconnecting")
+			time.Sleep(30 * time.Second)
+
+			err := l.connect()
+
+			if err != nil {
+				log.Warn("Error during reconnection, retrying")
+				continue
+			}
+
+			if l.registerEvents {
+				l.RegisterEvents()
+			}
+			break
+		}
+		break
+	}
+
+	l.handleReconnect()
 }
 
 // RegisterEvents ask the loxone server to send events
 func (l *Loxone) RegisterEvents() error {
+	l.registerEvents = true
+
 	_, err := l.SendCommand(registerEvents, nil)
 
 	if err != nil {
@@ -255,6 +301,10 @@ func (l *Loxone) authenticate() error {
 
 	salt, err := decryptAES(resultValue.Value, uniqueID, ivKey)
 
+	if err != nil {
+		return err
+	}
+
 	l.encrypt = &encrypt{
 		publicKey:   publicKey,
 		key:         uniqueID,
@@ -264,14 +314,16 @@ func (l *Loxone) authenticate() error {
 		salt:        createEncryptKey(2),
 	}
 
+	log.Info("Key Exchange OK")
+	log.Info("Authentication Starting")
+
+	err = l.createToken(l.user, l.password, uniqueID)
+
 	if err != nil {
 		return err
 	}
 
-	log.Info("Key Exchange OK")
-	log.Info("Authentication Starting")
-
-	l.createToken(l.user, l.password, uniqueID)
+	log.Info("Authentication OK")
 
 	return nil
 }
@@ -321,6 +373,7 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 		return nil, fmt.Errorf("unHandled response type: %d", result.responseType)
 	}
 
+	log.Debug(string(*result.data))
 	return &LoxoneBody{Code: 200}, nil
 }
 
