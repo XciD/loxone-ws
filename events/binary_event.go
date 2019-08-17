@@ -1,4 +1,4 @@
-package loxonews
+package events
 
 import (
 	"bytes"
@@ -10,48 +10,48 @@ import (
 	"strings"
 )
 
-// Event represent a Loxone event with an UUID and a Value
+// Event represent a Loxone EventTypeEvent with an UUID and a Value
 type Event struct {
 	UUID  string
 	Value float64
 }
 
-type binaryEvent struct {
-	eventType eventType
-	events    []*Event
-	data      *[]byte
+type BinaryEvent struct {
+	EventType EventType
+	Events    []*Event
+	Data      *[]byte
 }
 
-type header struct {
-	eventType eventType
-	length    int
-	estimated bool
-	empty     bool
+type Header struct {
+	EventType EventType
+	Length    int
+	Estimated bool
+	Empty     bool
 }
 
-var emptyHeader = &header{empty: true}
+var EmptyHeader = &Header{Empty: true}
 
-type eventType int32
+type EventType int
 
 const (
-	text         eventType = 0
-	file         eventType = 1
-	event        eventType = 2
-	eventtext    eventType = 3
-	daytimer     eventType = 4
-	outofservice eventType = 5
-	keepalive    eventType = 6
-	weather      eventType = 7
+	EventTypeText         EventType = 0
+	EventTypeFile         EventType = 1
+	EventTypeEvent        EventType = 2
+	EventTypeEventtext    EventType = 3
+	EventTypeDaytimer     EventType = 4
+	EventTypeOutofservice EventType = 5
+	EventTypeKeepalive    EventType = 6
+	EventTypeWeather      EventType = 7
 )
 
-func (e *binaryEvent) readEventText(bytes *[]byte) {
-
+func (e *BinaryEvent) readEventText(bytes *[]byte) {
+	// TODO
 }
 
-func (e *binaryEvent) readEvent(dataRef *[]byte) {
+func (e *BinaryEvent) readEvent(dataRef *[]byte) {
 	data := *dataRef
 	reader := bytes.NewReader(data)
-	// 1 event = 24 Bytes
+	// 1 EventTypeEvent = 24 Bytes
 	p := make([]byte, 24)
 	events := make([]*Event, 0)
 	for {
@@ -62,7 +62,7 @@ func (e *binaryEvent) readEvent(dataRef *[]byte) {
 		events = append(events, createEvent(p[:n]))
 	}
 
-	e.events = events
+	e.Events = events
 }
 
 func createEvent(eventRaw []byte) *Event {
@@ -74,9 +74,9 @@ func createEvent(eventRaw []byte) *Event {
 	}
 }
 
-func identifyHeader(bytes []byte) (*header, error) {
+func IdentifyHeader(bytes []byte) (*Header, error) {
 	if len(bytes) != 8 {
-		return nil, errors.New("error: wrong binary header received")
+		return nil, errors.New("error: wrong binary Header received")
 	}
 	eventTypeValue := bytes[1]
 	length := int(binary.LittleEndian.Uint32(bytes[4:]))
@@ -86,24 +86,24 @@ func identifyHeader(bytes []byte) (*header, error) {
 		estimated = true
 	}
 
-	return &header{
-		eventType: eventType(eventTypeValue),
-		length:    length,
-		estimated: estimated,
+	return &Header{
+		EventType: EventType(eventTypeValue),
+		Length:    length,
+		Estimated: estimated,
 	}, nil
 }
 
-func initBinaryEvent(bytes *[]byte, eventType eventType) *binaryEvent {
-	binaryEvent := &binaryEvent{eventType: eventType}
+func InitBinaryEvent(bytes *[]byte, eventType EventType) *BinaryEvent {
+	binaryEvent := &BinaryEvent{EventType: eventType}
 
 	switch eventType {
-	case eventtext:
+	case EventTypeEventtext:
 		binaryEvent.readEventText(bytes)
-	case event:
+	case EventTypeEvent:
 		binaryEvent.readEvent(bytes)
-	case daytimer:
+	case EventTypeDaytimer:
 		// TODO
-	case weather:
+	case EventTypeWeather:
 		// TODO
 	}
 

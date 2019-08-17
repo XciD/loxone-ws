@@ -1,4 +1,4 @@
-package loxonews
+package crypto
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,14 +19,14 @@ import (
 )
 
 // bytesToPublicKey bytes to public key
-func bytesToPublicKey(pub string) (*rsa.PublicKey, error) {
+func BytesToPublicKey(pub string) (*rsa.PublicKey, error) {
 	pub = strings.Replace(pub, "-----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE-----\n", 1)
 	pub = strings.Replace(pub, "-----END CERTIFICATE-----", "\n-----END CERTIFICATE-----", 1)
 
 	block, _ := pem.Decode([]byte(pub))
 
 	if block == nil {
-		return nil, errors.New("Block is nil")
+		return nil, errors.New("block is nil")
 	}
 
 	enc := x509.IsEncryptedPEMBlock(block)
@@ -45,19 +45,22 @@ func bytesToPublicKey(pub string) (*rsa.PublicKey, error) {
 	}
 	key, ok := ifc.(*rsa.PublicKey)
 	if !ok {
-		return nil, errors.New("Error during public key deserialization")
+		return nil, errors.New("error during public key deserialization")
 	}
 	return key, nil
 }
 
-func computeHmac256(message string, secret string) string {
+func ComputeHmac256(message string, secret string) string {
 	key, _ := hex.DecodeString(secret)
 	h := hmac.New(sha1.New, key)
-	h.Write([]byte(message))
+	_, err := h.Write([]byte(message))
+	if err != nil {
+		panic(err)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func createEncryptKey(size int32) string {
+func CreateEncryptKey(size int32) string {
 	key := make([]byte, size)
 	_, err := rand.Read(key)
 	if err != nil {
@@ -66,7 +69,7 @@ func createEncryptKey(size int32) string {
 	return hex.EncodeToString(key)
 }
 
-func encryptWithPublicKey(msg []byte, pub *rsa.PublicKey) (string, error) {
+func EncryptWithPublicKey(msg []byte, pub *rsa.PublicKey) (string, error) {
 	cipher, err := rsa.EncryptPKCS1v15(rand.Reader, pub, msg)
 	if err != nil {
 		return "", err
@@ -74,10 +77,10 @@ func encryptWithPublicKey(msg []byte, pub *rsa.PublicKey) (string, error) {
 	return base64.StdEncoding.EncodeToString(cipher), nil
 }
 
-func decryptAES(cypherEncoded string, uniqueKey string, ivKey string) ([]byte, error) {
+func DecryptAES(cypherEncoded string, uniqueKey string, ivKey string) ([]byte, error) {
 	key, _ := hex.DecodeString(uniqueKey)
 	cypher, _ := base64.StdEncoding.DecodeString(cypherEncoded)
-	hex.Decode(cypher, cypher)
+
 	ivDecoded, _ := hex.DecodeString(ivKey)
 
 	block, err := aes.NewCipher(key)
@@ -118,7 +121,7 @@ func pad(src []byte) []byte {
 	return append(src, padtext...)
 }
 
-func encryptAES(plainText string, uniqueKey string, ivKey string) (string, error) {
+func EncryptAES(plainText string, uniqueKey string, ivKey string) (string, error) {
 	key, _ := hex.DecodeString(uniqueKey)
 
 	block, err := aes.NewCipher(key)
@@ -135,8 +138,11 @@ func encryptAES(plainText string, uniqueKey string, ivKey string) (string, error
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-func sha1Hash(data string) string {
-	h := sha1.New()
-	h.Write([]byte(data))
+func Sha1Hash(data string) string {
+	h := sha1.New() // #nosec
+	_, err := h.Write([]byte(data))
+	if err != nil {
+		panic(err)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }

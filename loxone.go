@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"loxone_ws/crypto"
+	"loxone_ws/events"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 )
@@ -21,7 +24,7 @@ const (
 	getPublicKey                 = "jdev/sys/getPublicKey"
 	keyExchange                  = "jdev/sys/keyexchange/%s"
 	getUsersalt                  = "jdev/sys/getkey2/%s"
-	getToken                     = "jdev/sys/gettoken/%s/%s/%d/%s/%s"
+	getToken                     = "jdev/sys/gettoken/%s/%s/%d/%s/%s" // #nosec
 	aesPayload                   = "salt/%s/%s"
 	encryptionCmd                = "jdev/sys/enc/%s"
 	encryptionCommandAndResponse = "jdev/sys/fenc/%s"
@@ -90,12 +93,20 @@ type Loxone struct {
 	host     string
 	user     string
 	password string
-	socket   *loxoneWebsocket
 	encrypt  *encrypt
 	token    *loxoneToken
 	// Events received from the websockets
-	Events         chan *Event
+	Events         chan *events.Event
 	registerEvents bool
+
+	internalCmdChan chan *websocketResponse
+	Socket          *websocket.Conn
+	disconnect      chan bool
+}
+
+type websocketResponse struct {
+	data         *[]byte
+	responseType events.EventType
 }
 
 type encrypt struct {
@@ -163,7 +174,11 @@ func deserializeLoxoneResponse(jsonBytes *[]byte, class interface{}) (*LoxoneBod
 		rv := reflect.ValueOf(class).Elem()
 		rv.FieldByName("Value").SetString(ll["value"].(string))
 	case map[string]interface{}:
-		mapstructure.Decode(ll["value"], &class)
+		err := mapstructure.Decode(ll["value"], &class)
+
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return body, nil
@@ -176,11 +191,13 @@ func Connect(host string, user string, password string) (*Loxone, error) {
 	}
 
 	loxone := &Loxone{
-		host:           host,
-		user:           user,
-		password:       password,
-		registerEvents: false,
-		Events:         make(chan *Event),
+		host:            host,
+		user:            user,
+		password:        password,
+		registerEvents:  false,
+		Events:          make(chan *events.Event),
+		internalCmdChan: make(chan *websocketResponse),
+		disconnect:      make(chan bool),
 	}
 
 	err := loxone.connect()
@@ -189,15 +206,11 @@ func Connect(host string, user string, password string) (*Loxone, error) {
 		return nil, err
 	}
 
-	// Handle disconnect
-	go loxone.handleReconnect()
-
 	return loxone, nil
 }
 
 func (l *Loxone) connect() error {
-	l.socket = createSocket(l.host)
-	err := l.socket.connect(l.Events)
+	err := l.connectWs()
 
 	if err != nil {
 		return err
@@ -209,13 +222,15 @@ func (l *Loxone) connect() error {
 		return err
 	}
 
+	// Handle disconnect
+	go l.handleReconnect()
+
 	return nil
 }
 
 func (l *Loxone) handleReconnect() {
 	// If we finish, we restart a reconnect loop
-	select {
-	case _ = <-l.socket.disconnect:
+	for range l.disconnect {
 		for {
 			log.Warn("Disconnected, reconnecting")
 			time.Sleep(30 * time.Second)
@@ -228,14 +243,12 @@ func (l *Loxone) handleReconnect() {
 			}
 
 			if l.registerEvents {
-				l.RegisterEvents()
+				_ = l.RegisterEvents()
 			}
 			break
 		}
 		break
 	}
-
-	l.handleReconnect()
 }
 
 // RegisterEvents ask the loxone server to send events
@@ -281,11 +294,11 @@ func (l *Loxone) authenticate() error {
 	log.Info("Public Key OK")
 
 	// Create an unique key and an iv for AES
-	uniqueID := createEncryptKey(32)
-	ivKey := createEncryptKey(16)
+	uniqueID := crypto.CreateEncryptKey(32)
+	ivKey := crypto.CreateEncryptKey(16)
 
 	// encrypt both and send them to server to get a Salt
-	cipherMessage, err := encryptWithPublicKey([]byte(fmt.Sprintf("%s:%s", uniqueID, ivKey)), publicKey)
+	cipherMessage, err := crypto.EncryptWithPublicKey([]byte(fmt.Sprintf("%s:%s", uniqueID, ivKey)), publicKey)
 
 	if err != nil {
 		return err
@@ -299,7 +312,7 @@ func (l *Loxone) authenticate() error {
 		return err
 	}
 
-	salt, err := decryptAES(resultValue.Value, uniqueID, ivKey)
+	salt, err := crypto.DecryptAES(resultValue.Value, uniqueID, ivKey)
 
 	if err != nil {
 		return err
@@ -311,7 +324,7 @@ func (l *Loxone) authenticate() error {
 		iv:          ivKey,
 		oneTimeSalt: string(salt),
 		timestamp:   time.Now(),
-		salt:        createEncryptKey(2),
+		salt:        crypto.CreateEncryptKey(2),
 	}
 
 	log.Info("Key Exchange OK")
@@ -335,7 +348,7 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 		return nil, err
 	}
 
-	result, err := l.socket.sendCmd(&encryptedCmd)
+	result, err := l.sendSocketCmd(&encryptedCmd)
 
 	if err != nil {
 		return nil, err
@@ -351,7 +364,7 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 	}
 
 	if class != nil {
-		if result.responseType == text {
+		if result.responseType == events.EventTypeText {
 			body, err := deserializeLoxoneResponse(result.data, class)
 
 			if err != nil {
@@ -362,7 +375,7 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 				return nil, fmt.Errorf("error server, code: %d", body.Code)
 			}
 			return body, nil
-		} else if result.responseType == file {
+		} else if result.responseType == events.EventTypeFile {
 			err := json.Unmarshal(*result.data, &class)
 			if err != nil {
 				return nil, err
@@ -402,12 +415,126 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 	return nil
 }
 
+func (l *Loxone) connectWs() error {
+	u := url.URL{Scheme: "ws", Host: l.host, Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
+
+	socket, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	l.Socket = socket
+	if err != nil {
+		return err
+	}
+	go func() {
+		defer func() {
+			log.Warn("Closing Socket")
+			defer socket.Close()
+			err := l.Socket.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			if err != nil {
+				log.Println("write closeWs:", err)
+				return
+			}
+		}()
+		l.listenWs()
+	}()
+
+	return nil
+}
+
+func (l *Loxone) listenWs() {
+	incomingData := events.EmptyHeader
+
+	for {
+		_, message, err := l.Socket.ReadMessage()
+		if err != nil {
+			log.Error("read error:", err)
+			l.disconnect <- true
+			return
+		}
+		// Check if we received an header or not
+		if len(message) == 8 {
+			// we got an LX-Bin-header!
+			incomingData, err = events.IdentifyHeader(message)
+			if err != nil {
+				log.Debugf("Error during identify header %v", err)
+				incomingData = events.EmptyHeader
+			} else if incomingData.Length == 0 && incomingData.EventType != events.EventTypeOutofservice && incomingData.EventType != events.EventTypeKeepalive {
+				log.Debug("received header telling 0 bytes payload - resolve request with null!")
+				// TODO sendOnBinaryMessage
+				incomingData = events.EmptyHeader
+			} else {
+				log.Debugf("Received header: %+v\n", incomingData)
+
+				if incomingData.EventType == events.EventTypeOutofservice {
+					log.Warn("Miniserver out of service!")
+					l.disconnect <- true
+					break
+				}
+
+				if incomingData.EventType == events.EventTypeKeepalive {
+					log.Debug("KeepAlive")
+					incomingData = events.EmptyHeader
+					continue
+				}
+				// Waiting for the data
+				continue
+			}
+
+		} else if !incomingData.Empty && incomingData.Length == len(message) {
+			// Received message
+			switch incomingData.EventType {
+			case events.EventTypeText:
+				log.Debug("Received a text message from previous header")
+				l.internalCmdChan <- &websocketResponse{data: &message, responseType: incomingData.EventType}
+			case events.EventTypeFile:
+				log.Debug("Received a file from previous header")
+				l.internalCmdChan <- &websocketResponse{data: &message, responseType: incomingData.EventType}
+			case events.EventTypeEvent:
+				l.handleBinaryEvent(&message, incomingData.EventType)
+			case events.EventTypeEventtext:
+				l.handleBinaryEvent(&message, incomingData.EventType)
+			case events.EventTypeDaytimer:
+				l.handleBinaryEvent(&message, incomingData.EventType)
+			case events.EventTypeWeather:
+				l.handleBinaryEvent(&message, incomingData.EventType)
+			default:
+				log.Warnf("Unknown event %d", incomingData.EventType)
+			}
+
+			incomingData = events.EmptyHeader
+		} else {
+			log.Debug("Received binary message without header ")
+			// TODO Send to error
+		}
+	}
+}
+
+func (l *Loxone) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventType) {
+	events := events.InitBinaryEvent(binaryEvent, eventType)
+
+	for _, event := range events.Events {
+		l.Events <- event
+	}
+}
+
+func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
+	log.Debug("Sending commande to WS")
+	err := l.Socket.WriteMessage(websocket.TextMessage, *cmd)
+
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debug("Waiting for answer")
+	result := <-l.internalCmdChan
+	log.Debugf("WS answered")
+	return result, nil
+}
+
 func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSalt string) string {
 	// create a SHA1 hash of the (salted) password
-	hash := strings.ToUpper(sha1Hash(fmt.Sprintf("%s:%s", password, salt)))
+	hash := strings.ToUpper(crypto.Sha1Hash(fmt.Sprintf("%s:%s", password, salt)))
 
 	// hash with user and otSalt
-	hash = computeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
+	hash = crypto.ComputeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
 
 	return hash
 }
@@ -419,7 +546,7 @@ func (e *encrypt) getEncryptedCmd(cmd string, encryptType encryptType) ([]byte, 
 
 	// TODO code next Salt
 	cmd = fmt.Sprintf(aesPayload, e.salt, cmd)
-	cipher, err := encryptAES(cmd, e.key, e.iv)
+	cipher, err := crypto.EncryptAES(cmd, e.key, e.iv)
 
 	if err != nil {
 		return nil, err
@@ -435,7 +562,7 @@ func (e *encrypt) getEncryptedCmd(cmd string, encryptType encryptType) ([]byte, 
 }
 
 func (e *encrypt) decryptCmd(cipherText []byte) ([]byte, error) {
-	return decryptAES(string(cipherText), e.key, e.iv)
+	return crypto.DecryptAES(string(cipherText), e.key, e.iv)
 }
 
 func getPublicKeyFromServer(url string) (*rsa.PublicKey, error) {
@@ -455,6 +582,7 @@ func getPublicKeyFromServer(url string) (*rsa.PublicKey, error) {
 	}
 
 	defer resp.Body.Close()
+
 	body, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
@@ -469,8 +597,8 @@ func getPublicKeyFromServer(url string) (*rsa.PublicKey, error) {
 	}
 
 	if publicKey.Value == "" {
-		return nil, errors.New("Error, pub key is empty")
+		return nil, errors.New("pub key is empty")
 	}
 
-	return bytesToPublicKey(publicKey.Value)
+	return crypto.BytesToPublicKey(publicKey.Value)
 }

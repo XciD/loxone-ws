@@ -1,0 +1,49 @@
+package events
+
+import (
+	"fmt"
+	"reflect"
+	"testing"
+)
+
+func TestDetectHeader(t *testing.T) {
+	compareHeader(&Header{Length: 353, EventType: EventTypeText, Estimated: false}, []byte{3, 0, 0, 0, 97, 1, 0, 0}, t)
+	compareHeader(&Header{Length: 320, EventType: EventTypeText, Estimated: false}, []byte{3, 0, 0, 0, 64, 1, 0, 0}, t)
+	compareHeader(&Header{Length: 76, EventType: EventTypeText, Estimated: false}, []byte{3, 0, 0, 0, 76, 0, 0, 0}, t)
+	compareHeader(&Header{Length: 48, EventType: EventTypeWeather, Estimated: false}, []byte{3, 7, 0, 0, 48, 0, 0, 0}, t)
+	compareHeader(&Header{Length: 2712, EventType: EventTypeEvent, Estimated: false}, []byte{3, 2, 0, 0, 152, 10, 0, 0}, t)
+	compareHeader(&Header{Length: 1496, EventType: EventTypeEventtext, Estimated: false}, []byte{3, 3, 0, 0, 216, 5, 0, 0}, t)
+	compareHeader(&Header{Length: 82888, EventType: EventTypeFile, Estimated: false}, []byte{3, 1, 0, 0, 200, 67, 1, 0}, t)
+	compareHeader(&Header{Length: 87636, EventType: EventTypeFile, Estimated: true}, []byte{3, 1, 128, 0, 84, 86, 1, 0}, t)
+}
+
+func compareHeader(expected *Header, bytes []byte, t *testing.T) {
+	result, _ := IdentifyHeader(bytes)
+	if !reflect.DeepEqual(expected, result) {
+		fmt.Printf("expected: %+v\n", expected)
+		fmt.Printf("result: %+v\n", result)
+		t.Error("Header are not equals")
+	}
+}
+
+func TestInitBinaryEvent(t *testing.T) {
+	data := []byte{82, 182, 253, 14, 16, 2, 194, 21, 255, 255, 33, 90, 21, 161, 245, 123, 107, 188, 116, 147, 24, 4, 182, 63}
+	eventType := EventTypeEvent
+
+	compareEvent(&BinaryEvent{
+		EventType: eventType,
+		Events: []*Event{{
+			UUID:  "0efdb652-0210-15c2-ffff215a15a1f57b",
+			Value: 0.08600000000000001,
+		},
+		}}, data, EventTypeEvent, t)
+}
+
+func compareEvent(expected *BinaryEvent, bytes []byte, eventType EventType, t *testing.T) {
+	result := InitBinaryEvent(&bytes, eventType)
+	if !reflect.DeepEqual(expected, result) {
+		fmt.Printf("expected: %+v\n", expected)
+		fmt.Printf("result: %+v\n", result)
+		t.Error("events are not equals")
+	}
+}
