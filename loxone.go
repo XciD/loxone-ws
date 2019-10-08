@@ -1,4 +1,4 @@
-package loxonews
+package loxone
 
 import (
 	"crypto/rsa"
@@ -33,22 +33,22 @@ const (
 	getConfig                    = "data/LoxAPP3.json"
 )
 
-// LoxoneBody response form command sent by ws
-type LoxoneBody struct {
+// Body response form command sent by ws
+type Body struct {
 	// Control name of the control invoked
 	Control string
 	// Code status
 	Code int32
 }
 
-// LoxoneSimpleValue represent a simple Loxone Response Value
-type LoxoneSimpleValue struct {
+// SimpleValue represent a simple Loxone Response Value
+type SimpleValue struct {
 	// The value answered
 	Value string
 }
 
-// LoxoneConfig represent the LoxAPP3.json config file
-type LoxoneConfig struct {
+// Config represent the LoxAPP3.json config file
+type Config struct {
 	// LastModified
 	LastModified string
 	// MsInfo
@@ -58,15 +58,15 @@ type LoxoneConfig struct {
 	// OperatingModes of the loxone server
 	OperatingModes map[string]interface{}
 	// Rooms of the loxone server
-	Rooms map[string]*LoxoneRoom
+	Rooms map[string]*Room
 	// Cats Categories of the loxone server
-	Cats map[string]*LoxoneCategory
+	Cats map[string]*Category
 	// Controls all the control of the loxone server
-	Controls map[string]*LoxoneControl
+	Controls map[string]*Control
 }
 
-// LoxoneControl represent a control
-type LoxoneControl struct {
+// Control represent a control
+type Control struct {
 	Name       string
 	Type       string
 	UUIDAction string
@@ -75,15 +75,15 @@ type LoxoneControl struct {
 	States     map[string]interface{} // Can be an array or a string
 }
 
-// LoxoneRoom represent a room
-type LoxoneRoom struct {
+// Room represent a room
+type Room struct {
 	Name string
 	UUID string
 	Type int32
 }
 
-// LoxoneCategory represent a category
-type LoxoneCategory struct {
+// Category represent a category
+type Category struct {
 	Name string
 	UUID string
 	Type string
@@ -95,14 +95,17 @@ type Loxone struct {
 	user     string
 	password string
 	encrypt  *encrypt
-	token    *loxoneToken
-	// Events received from the websockets
-	Events         chan *events.Event
-	registerEvents bool
+	token    *token
+	// Loxone Events received from the websockets
+	Events chan *events.Event
 
-	internalCmdChan chan *websocketResponse
-	Socket          *websocket.Conn
-	disconnect      chan bool
+	callbackChannel chan *websocketResponse
+	socketMessage   chan *[]byte
+	socket          *websocket.Conn
+	disconnected    chan bool
+	stop    chan bool
+
+	registerEvents bool
 }
 
 type websocketResponse struct {
@@ -119,7 +122,7 @@ type encrypt struct {
 	salt        string
 }
 
-type loxoneToken struct {
+type token struct {
 	token        string
 	key          string
 	validUntil   int64
@@ -127,7 +130,7 @@ type loxoneToken struct {
 	unsecurePass bool
 }
 
-type loxoneSalt struct {
+type salt struct {
 	OneTimeSalt string `mapstructure:"key"`
 	Salt        string `mapstructure:"Salt"`
 }
@@ -140,66 +143,25 @@ const (
 	requestResponseVal encryptType = 2
 )
 
-func deserializeLoxoneResponse(jsonBytes *[]byte, class interface{}) (*LoxoneBody, error) {
-	raw := make(map[string]interface{})
-	err := json.Unmarshal(*jsonBytes, &raw)
-	if err != nil {
-		return nil, err
-	}
-
-	ll := raw["LL"].(map[string]interface{})
-
-	body := &LoxoneBody{Control: ll["control"].(string)}
-
-	var code interface{}
-	// If can be on Code or code...
-	if val, ok := ll["Code"]; ok {
-		code = val
-	}
-	if val, ok := ll["code"]; ok {
-		code = val
-	}
-
-	// Can be a string or a float...
-	switch code.(type) {
-	case string:
-		i, _ := strconv.ParseInt(code.(string), 10, 32)
-		body.Code = int32(i)
-	case float64:
-		body.Code = int32(code.(float64))
-	}
-
-	// Deserialize value
-	switch ll["value"].(type) {
-	case string:
-		rv := reflect.ValueOf(class).Elem()
-		rv.FieldByName("Value").SetString(ll["value"].(string))
-	case map[string]interface{}:
-		err := mapstructure.Decode(ll["value"], &class)
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return body, nil
-}
-
 // Connect to the loxone websocket
-func Connect(host string, user string, password string) (*Loxone, error) {
+func New(host string, user string, password string) (*Loxone, error) {
 	if host == "" || user == "" || password == "" {
 		return nil, errors.New("missing host / user / password")
 	}
 
 	loxone := &Loxone{
+		Events:          make(chan *events.Event),
 		host:            host,
 		user:            user,
 		password:        password,
 		registerEvents:  false,
-		Events:          make(chan *events.Event),
-		internalCmdChan: make(chan *websocketResponse),
-		disconnect:      make(chan bool),
+		callbackChannel: make(chan *websocketResponse),
+		disconnected:    make(chan bool),
+		stop:    make(chan bool),
+		socketMessage:   make(chan *[]byte),
 	}
+
+	go loxone.handleMessages()
 
 	err := loxone.connect()
 
@@ -223,7 +185,7 @@ func (l *Loxone) connect() error {
 		return err
 	}
 
-	// Handle disconnect
+	// Handle disconnected
 	go l.handleReconnect()
 
 	return nil
@@ -231,25 +193,43 @@ func (l *Loxone) connect() error {
 
 func (l *Loxone) handleReconnect() {
 	// If we finish, we restart a reconnect loop
-	for range l.disconnect {
-		for {
-			log.Warn("Disconnected, reconnecting")
-			time.Sleep(30 * time.Second)
+	defer func() {
+		log.Info("Stopping disconnect loop")
+	}()
 
-			err := l.connect()
+	for {
+		select {
+		case <-l.stop:
+			break
+		case <-l.disconnected:
+			for {
+				log.Warn("Disconnected, reconnecting")
+				time.Sleep(30 * time.Second)
 
-			if err != nil {
-				log.Warn("Error during reconnection, retrying")
-				continue
-			}
+				err := l.connect()
 
-			if l.registerEvents {
-				_ = l.RegisterEvents()
+				if err != nil {
+					log.Warn("Error during reconnection, retrying")
+					continue
+				}
+
+				if l.registerEvents {
+					_ = l.RegisterEvents()
+				}
+				break
 			}
 			break
 		}
-		break
 	}
+}
+
+func (l *Loxone) Close() {
+	defer func() {
+		l.socket.Close()
+	}()
+
+	close(l.stop)
+	_ = l.socket.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 }
 
 // RegisterEvents ask the loxone server to send events
@@ -266,8 +246,8 @@ func (l *Loxone) RegisterEvents() error {
 }
 
 // GetConfig get the loxone server config
-func (l *Loxone) GetConfig() (*LoxoneConfig, error) {
-	config := &LoxoneConfig{}
+func (l *Loxone) GetConfig() (*Config, error) {
+	config := &Config{}
 
 	_, err := l.SendCommand(getConfig, config)
 
@@ -279,70 +259,11 @@ func (l *Loxone) GetConfig() (*LoxoneConfig, error) {
 }
 
 // SendCommand Send a command to the loxone server
-func (l *Loxone) SendCommand(cmd string, class interface{}) (*LoxoneBody, error) {
+func (l *Loxone) SendCommand(cmd string, class interface{}) (*Body, error) {
 	return l.sendCmdWithEnc(cmd, none, class)
 }
 
-func (l *Loxone) authenticate() error {
-	// Retrieve public key
-	log.Info("Asking for Public Key")
-	publicKey, err := getPublicKeyFromServer(l.host)
-
-	if err != nil {
-		return err
-	}
-
-	log.Info("Public Key OK")
-
-	// Create an unique key and an iv for AES
-	uniqueID := crypto.CreateEncryptKey(32)
-	ivKey := crypto.CreateEncryptKey(16)
-
-	// encrypt both and send them to server to get a Salt
-	cipherMessage, err := crypto.EncryptWithPublicKey([]byte(fmt.Sprintf("%s:%s", uniqueID, ivKey)), publicKey)
-
-	if err != nil {
-		return err
-	}
-
-	log.Info("Key Exchange with Miniserver")
-	resultValue := &LoxoneSimpleValue{}
-	_, err = l.sendCmdWithEnc(fmt.Sprintf(keyExchange, cipherMessage), none, resultValue)
-
-	if err != nil {
-		return err
-	}
-
-	salt, err := crypto.DecryptAES(resultValue.Value, uniqueID, ivKey)
-
-	if err != nil {
-		return err
-	}
-
-	l.encrypt = &encrypt{
-		publicKey:   publicKey,
-		key:         uniqueID,
-		iv:          ivKey,
-		oneTimeSalt: string(salt),
-		timestamp:   time.Now(),
-		salt:        crypto.CreateEncryptKey(2),
-	}
-
-	log.Info("Key Exchange OK")
-	log.Info("Authentication Starting")
-
-	err = l.createToken(l.user, l.password, uniqueID)
-
-	if err != nil {
-		return err
-	}
-
-	log.Info("Authentication OK")
-
-	return nil
-}
-
-func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class interface{}) (*LoxoneBody, error) {
+func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class interface{}) (*Body, error) {
 	encryptedCmd, err := l.encrypt.getEncryptedCmd(cmd, encryptType)
 
 	if err != nil {
@@ -388,13 +309,86 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 	}
 
 	log.Debug(string(*result.data))
-	return &LoxoneBody{Code: 200}, nil
+	return &Body{Code: 200}, nil
+}
+
+func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
+	log.Debug("Sending commande to WS")
+	err := l.socket.WriteMessage(websocket.TextMessage, *cmd)
+
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debug("Waiting for answer")
+	result := <-l.callbackChannel
+	log.Debugf("WS answered")
+	return result, nil
+}
+
+func (l *Loxone) authenticate() error {
+	// Retrieve public key
+	log.Info("Asking for Public Key")
+	publicKey, err := getPublicKeyFromServer(l.host)
+
+	if err != nil {
+		return err
+	}
+
+	log.Info("Public Key OK")
+
+	// Create an unique key and an iv for AES
+	uniqueID := crypto.CreateEncryptKey(32)
+	ivKey := crypto.CreateEncryptKey(16)
+
+	// encrypt both and send them to server to get a Salt
+	cipherMessage, err := crypto.EncryptWithPublicKey([]byte(fmt.Sprintf("%s:%s", uniqueID, ivKey)), publicKey)
+
+	if err != nil {
+		return err
+	}
+
+	log.Info("Key Exchange with Miniserver")
+	resultValue := &SimpleValue{}
+	_, err = l.sendCmdWithEnc(fmt.Sprintf(keyExchange, cipherMessage), none, resultValue)
+
+	if err != nil {
+		return err
+	}
+
+	salt, err := crypto.DecryptAES(resultValue.Value, uniqueID, ivKey)
+
+	if err != nil {
+		return err
+	}
+
+	l.encrypt = &encrypt{
+		publicKey:   publicKey,
+		key:         uniqueID,
+		iv:          ivKey,
+		oneTimeSalt: string(salt),
+		timestamp:   time.Now(),
+		salt:        crypto.CreateEncryptKey(2),
+	}
+
+	log.Info("Key Exchange OK")
+	log.Info("Authentication Starting")
+
+	err = l.createToken(l.user, l.password, uniqueID)
+
+	if err != nil {
+		return err
+	}
+
+	log.Info("Authentication OK")
+
+	return nil
 }
 
 func (l *Loxone) createToken(user string, password string, uniqueID string) error {
 	cmd := fmt.Sprintf(getUsersalt, user)
 
-	salt := &loxoneSalt{}
+	salt := &salt{}
 	_, err := l.sendCmdWithEnc(cmd, requestResponseVal, salt)
 
 	if err != nil {
@@ -405,7 +399,7 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 
 	cmd = fmt.Sprintf(getToken, hash, user, 4, uniqueID, "GO")
 
-	token := &loxoneToken{}
+	token := &token{}
 	_, err = l.sendCmdWithEnc(cmd, requestResponseVal, token)
 
 	if err != nil {
@@ -420,90 +414,105 @@ func (l *Loxone) connectWs() error {
 	u := url.URL{Scheme: "ws", Host: l.host, Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
 
 	socket, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
-	l.Socket = socket
+	l.socket = socket
 	if err != nil {
 		return err
 	}
-	go func() {
-		defer func() {
-			log.Warn("Closing Socket")
-			defer socket.Close()
-			err := l.Socket.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			if err != nil {
-				log.Println("write closeWs:", err)
-				return
-			}
-		}()
-		l.listenWs()
-	}()
+
+	go l.readPump()
 
 	return nil
 }
 
-func (l *Loxone) listenWs() {
-	incomingData := events.EmptyHeader
+func (l *Loxone) readPump() {
+	defer func() {
+		log.Info("Stopping pump")
+		defer l.socket.Close()
+	}()
+	log.Info("Starting websocket pump")
 
 	for {
-		_, message, err := l.Socket.ReadMessage()
+		_, message, err := l.socket.ReadMessage()
 		if err != nil {
-			log.Error("read error:", err)
-			l.disconnect <- true
-			return
+			l.disconnected <- true
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
+			}
+			break
 		}
-		// Check if we received an header or not
-		if len(message) == 8 {
-			// we got an LX-Bin-header!
-			incomingData, err = events.IdentifyHeader(message)
-			if err != nil {
-				log.Debugf("Error during identify header %v", err)
-				incomingData = events.EmptyHeader
-			} else if incomingData.Length == 0 && incomingData.EventType != events.EventTypeOutofservice && incomingData.EventType != events.EventTypeKeepalive {
-				log.Debug("received header telling 0 bytes payload - resolve request with null!")
-				// TODO sendOnBinaryMessage
-				incomingData = events.EmptyHeader
-			} else {
-				log.Debugf("Received header: %+v\n", incomingData)
 
-				if incomingData.EventType == events.EventTypeOutofservice {
-					log.Warn("Miniserver out of service!")
-					l.disconnect <- true
-					break
-				}
+		l.socketMessage <- &message
+	}
+}
 
-				if incomingData.EventType == events.EventTypeKeepalive {
-					log.Debug("KeepAlive")
+func (l *Loxone) handleMessages() {
+	incomingData := events.EmptyHeader
+	var err error
+
+	defer func() {
+		log.Info("Stoping message handling")
+	}()
+
+	for {
+		select {
+			case <- l.stop:
+				break
+			case message := <- l.socketMessage:
+				// Check if we received an header or not
+				if len(*message) == 8 {
+					// we got an LX-Bin-header!
+					incomingData, err = events.IdentifyHeader(*message)
+					if err != nil {
+						log.Debugf("Error during identify header %v", err)
+						incomingData = events.EmptyHeader
+					} else if incomingData.Length == 0 && incomingData.EventType != events.EventTypeOutofservice && incomingData.EventType != events.EventTypeKeepalive {
+						log.Debug("received header telling 0 bytes payload - resolve request with null!")
+						// TODO sendOnBinaryMessage
+						incomingData = events.EmptyHeader
+					} else {
+						log.Debugf("Received header: %+v\n", incomingData)
+
+						if incomingData.EventType == events.EventTypeOutofservice {
+							log.Warn("Miniserver out of service!")
+							l.disconnected <- true
+							break
+						}
+
+						if incomingData.EventType == events.EventTypeKeepalive {
+							log.Debug("KeepAlive")
+							incomingData = events.EmptyHeader
+							continue
+						}
+						// Waiting for the data
+						continue
+					}
+
+				} else if !incomingData.Empty && incomingData.Length == len(*message) {
+					// Received message
+					switch incomingData.EventType {
+					case events.EventTypeText:
+						log.Debug("Received a text message from previous header")
+						l.callbackChannel <- &websocketResponse{data: message, responseType: incomingData.EventType}
+					case events.EventTypeFile:
+						log.Debug("Received a file from previous header")
+						l.callbackChannel <- &websocketResponse{data: message, responseType: incomingData.EventType}
+					case events.EventTypeEvent:
+						l.handleBinaryEvent(message, incomingData.EventType)
+					case events.EventTypeEventtext:
+						l.handleBinaryEvent(message, incomingData.EventType)
+					case events.EventTypeDaytimer:
+						l.handleBinaryEvent(message, incomingData.EventType)
+					case events.EventTypeWeather:
+						l.handleBinaryEvent(message, incomingData.EventType)
+					default:
+						log.Warnf("Unknown event %d", incomingData.EventType)
+					}
+
 					incomingData = events.EmptyHeader
-					continue
+				} else {
+					log.Debug("Received binary message without header ")
+					// TODO Send to error
 				}
-				// Waiting for the data
-				continue
-			}
-
-		} else if !incomingData.Empty && incomingData.Length == len(message) {
-			// Received message
-			switch incomingData.EventType {
-			case events.EventTypeText:
-				log.Debug("Received a text message from previous header")
-				l.internalCmdChan <- &websocketResponse{data: &message, responseType: incomingData.EventType}
-			case events.EventTypeFile:
-				log.Debug("Received a file from previous header")
-				l.internalCmdChan <- &websocketResponse{data: &message, responseType: incomingData.EventType}
-			case events.EventTypeEvent:
-				l.handleBinaryEvent(&message, incomingData.EventType)
-			case events.EventTypeEventtext:
-				l.handleBinaryEvent(&message, incomingData.EventType)
-			case events.EventTypeDaytimer:
-				l.handleBinaryEvent(&message, incomingData.EventType)
-			case events.EventTypeWeather:
-				l.handleBinaryEvent(&message, incomingData.EventType)
-			default:
-				log.Warnf("Unknown event %d", incomingData.EventType)
-			}
-
-			incomingData = events.EmptyHeader
-		} else {
-			log.Debug("Received binary message without header ")
-			// TODO Send to error
 		}
 	}
 }
@@ -514,20 +523,6 @@ func (l *Loxone) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventTy
 	for _, event := range events.Events {
 		l.Events <- event
 	}
-}
-
-func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
-	log.Debug("Sending commande to WS")
-	err := l.Socket.WriteMessage(websocket.TextMessage, *cmd)
-
-	if err != nil {
-		return nil, err
-	}
-
-	log.Debug("Waiting for answer")
-	result := <-l.internalCmdChan
-	log.Debugf("WS answered")
-	return result, nil
 }
 
 func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSalt string) string {
@@ -590,7 +585,7 @@ func getPublicKeyFromServer(url string) (*rsa.PublicKey, error) {
 		return nil, err
 	}
 
-	publicKey := &LoxoneSimpleValue{}
+	publicKey := &SimpleValue{}
 	_, err = deserializeLoxoneResponse(&body, publicKey)
 
 	if err != nil {
@@ -602,4 +597,49 @@ func getPublicKeyFromServer(url string) (*rsa.PublicKey, error) {
 	}
 
 	return crypto.BytesToPublicKey(publicKey.Value)
+}
+
+func deserializeLoxoneResponse(jsonBytes *[]byte, class interface{}) (*Body, error) {
+	raw := make(map[string]interface{})
+	err := json.Unmarshal(*jsonBytes, &raw)
+	if err != nil {
+		return nil, err
+	}
+
+	ll := raw["LL"].(map[string]interface{})
+
+	body := &Body{Control: ll["control"].(string)}
+
+	var code interface{}
+	// If can be on Code or code...
+	if val, ok := ll["Code"]; ok {
+		code = val
+	}
+	if val, ok := ll["code"]; ok {
+		code = val
+	}
+
+	// Can be a string or a float...
+	switch code.(type) {
+	case string:
+		i, _ := strconv.ParseInt(code.(string), 10, 32)
+		body.Code = int32(i)
+	case float64:
+		body.Code = int32(code.(float64))
+	}
+
+	// Deserialize value
+	switch ll["value"].(type) {
+	case string:
+		rv := reflect.ValueOf(class).Elem()
+		rv.FieldByName("Value").SetString(ll["value"].(string))
+	case map[string]interface{}:
+		err := mapstructure.Decode(ll["value"], &class)
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return body, nil
 }

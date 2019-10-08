@@ -4,6 +4,7 @@ BUILD_DIR 		:= build
 
 .PHONY: init
 init:
+	go get github.com/golangci/golangci-lint/cmd/golangci-lint@v1.17.1
 	go get -u github.com/onsi/ginkgo/ginkgo
 	go get -u github.com/modocache/gover
 	go mod download

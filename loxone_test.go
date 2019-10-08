@@ -1,4 +1,4 @@
-package loxonews
+package loxone
 
 import (
 	"testing"
@@ -36,7 +36,7 @@ func TestEncryptation_HashUser(t *testing.T) {
 func TestDeserializeLoxoneResponse(t *testing.T) {
 	json := []byte(`{"LL": {"value": "ok", "code": "200", "control": "test"}}`)
 
-	result := &LoxoneSimpleValue{}
+	result := &SimpleValue{}
 	body, _ := deserializeLoxoneResponse(&json, result)
 
 	if result.Value != "ok" {
@@ -53,7 +53,7 @@ func TestDeserializeLoxoneResponse(t *testing.T) {
 
 	json = []byte(`{"LL": {"value": {"key": "ontTimeSalt", "Salt": "Salt"}, "code": 200, "control": "test"}}`)
 
-	resultSalt := &loxoneSalt{}
+	resultSalt := &salt{}
 	body, _ = deserializeLoxoneResponse(&json, resultSalt)
 
 	if resultSalt.Salt != "Salt" {
