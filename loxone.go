@@ -127,7 +127,7 @@ type Loxone struct {
 	socketMessage   chan *[]byte
 	socket          *websocket.Conn
 	disconnected    chan bool
-	stop    chan bool
+	stop            chan bool
 
 	registerEvents bool
 }
@@ -181,7 +181,7 @@ func New(host string, user string, password string) (*Loxone, error) {
 		registerEvents:  false,
 		callbackChannel: make(chan *websocketResponse),
 		disconnected:    make(chan bool),
-		stop:    make(chan bool),
+		stop:            make(chan bool),
 		socketMessage:   make(chan *[]byte),
 	}
 
@@ -479,64 +479,64 @@ func (l *Loxone) handleMessages() {
 
 	for {
 		select {
-			case <- l.stop:
-				break
-			case message := <- l.socketMessage:
-				// Check if we received an header or not
-				if len(*message) == 8 {
-					// we got an LX-Bin-header!
-					incomingData, err = events.IdentifyHeader(*message)
-					if err != nil {
-						log.Debugf("Error during identify header %v", err)
-						incomingData = events.EmptyHeader
-					} else if incomingData.Length == 0 && incomingData.EventType != events.EventTypeOutofservice && incomingData.EventType != events.EventTypeKeepalive {
-						log.Debug("received header telling 0 bytes payload - resolve request with null!")
-						// TODO sendOnBinaryMessage
-						incomingData = events.EmptyHeader
-					} else {
-						log.Debugf("Received header: %+v\n", incomingData)
-
-						if incomingData.EventType == events.EventTypeOutofservice {
-							log.Warn("Miniserver out of service!")
-							l.disconnected <- true
-							break
-						}
-
-						if incomingData.EventType == events.EventTypeKeepalive {
-							log.Debug("KeepAlive")
-							incomingData = events.EmptyHeader
-							continue
-						}
-						// Waiting for the data
-						continue
-					}
-
-				} else if !incomingData.Empty && incomingData.Length == len(*message) {
-					// Received message
-					switch incomingData.EventType {
-					case events.EventTypeText:
-						log.Debug("Received a text message from previous header")
-						l.callbackChannel <- &websocketResponse{data: message, responseType: incomingData.EventType}
-					case events.EventTypeFile:
-						log.Debug("Received a file from previous header")
-						l.callbackChannel <- &websocketResponse{data: message, responseType: incomingData.EventType}
-					case events.EventTypeEvent:
-						l.handleBinaryEvent(message, incomingData.EventType)
-					case events.EventTypeEventtext:
-						l.handleBinaryEvent(message, incomingData.EventType)
-					case events.EventTypeDaytimer:
-						l.handleBinaryEvent(message, incomingData.EventType)
-					case events.EventTypeWeather:
-						l.handleBinaryEvent(message, incomingData.EventType)
-					default:
-						log.Warnf("Unknown event %d", incomingData.EventType)
-					}
-
+		case <-l.stop:
+			break
+		case message := <-l.socketMessage:
+			// Check if we received an header or not
+			if len(*message) == 8 {
+				// we got an LX-Bin-header!
+				incomingData, err = events.IdentifyHeader(*message)
+				if err != nil {
+					log.Debugf("Error during identify header %v", err)
+					incomingData = events.EmptyHeader
+				} else if incomingData.Length == 0 && incomingData.EventType != events.EventTypeOutofservice && incomingData.EventType != events.EventTypeKeepalive {
+					log.Debug("received header telling 0 bytes payload - resolve request with null!")
+					// TODO sendOnBinaryMessage
 					incomingData = events.EmptyHeader
 				} else {
-					log.Debug("Received binary message without header ")
-					// TODO Send to error
+					log.Debugf("Received header: %+v\n", incomingData)
+
+					if incomingData.EventType == events.EventTypeOutofservice {
+						log.Warn("Miniserver out of service!")
+						l.disconnected <- true
+						break
+					}
+
+					if incomingData.EventType == events.EventTypeKeepalive {
+						log.Debug("KeepAlive")
+						incomingData = events.EmptyHeader
+						continue
+					}
+					// Waiting for the data
+					continue
 				}
+
+			} else if !incomingData.Empty && incomingData.Length == len(*message) {
+				// Received message
+				switch incomingData.EventType {
+				case events.EventTypeText:
+					log.Debug("Received a text message from previous header")
+					l.callbackChannel <- &websocketResponse{data: message, responseType: incomingData.EventType}
+				case events.EventTypeFile:
+					log.Debug("Received a file from previous header")
+					l.callbackChannel <- &websocketResponse{data: message, responseType: incomingData.EventType}
+				case events.EventTypeEvent:
+					l.handleBinaryEvent(message, incomingData.EventType)
+				case events.EventTypeEventtext:
+					l.handleBinaryEvent(message, incomingData.EventType)
+				case events.EventTypeDaytimer:
+					l.handleBinaryEvent(message, incomingData.EventType)
+				case events.EventTypeWeather:
+					l.handleBinaryEvent(message, incomingData.EventType)
+				default:
+					log.Warnf("Unknown event %d", incomingData.EventType)
+				}
+
+				incomingData = events.EmptyHeader
+			} else {
+				log.Debug("Received binary message without header ")
+				// TODO Send to error
+			}
 		}
 	}
 }
