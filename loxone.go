@@ -65,6 +65,30 @@ type Config struct {
 	Controls map[string]*Control
 }
 
+func (cfg *Config) CatName(key interface{}) string {
+	k, ok := key.(string)
+	if !ok {
+		return ""
+	}
+	cat, ok := cfg.Cats[k]
+	if !ok {
+		return ""
+	}
+	return cat.Name
+}
+
+func (cfg *Config) RoomName(key interface{}) string {
+	k, ok := key.(string)
+	if !ok {
+		return ""
+	}
+	room, ok := cfg.Rooms[k]
+	if !ok {
+		return ""
+	}
+	return room.Name
+}
+
 // Control represent a control
 type Control struct {
 	Name       string
