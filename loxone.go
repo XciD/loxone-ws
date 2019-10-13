@@ -171,8 +171,16 @@ const (
 
 // Connect to the loxone websocket
 func New(host string, user string, password string) (*Loxone, error) {
-	if host == "" || user == "" || password == "" {
-		return nil, errors.New("missing host / user / password")
+
+	// Check if all mandatory parameters were given
+	if host == "" {
+		return nil, errors.New("missing host")
+	}
+	if user == "" {
+		return nil, errors.New("missing user")
+	}
+	if password == "" {
+		return nil, errors.New("missing password")
 	}
 
 	loxone := &Loxone{
