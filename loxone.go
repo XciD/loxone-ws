@@ -677,12 +677,12 @@ func deserializeLoxoneResponse(jsonBytes *[]byte, class interface{}) (*Body, err
 	}
 
 	// Can be a string or a float...
-	switch code.(type) {
+	switch code := code.(type) {
 	case string:
-		i, _ := strconv.ParseInt(code.(string), 10, 32)
+		i, _ := strconv.ParseInt(code, 10, 32)
 		body.Code = int32(i)
 	case float64:
-		body.Code = int32(code.(float64))
+		body.Code = int32(code)
 	}
 
 	// Deserialize value
