@@ -94,6 +94,7 @@ type Control struct {
 	Name       string
 	Type       string
 	UUIDAction string
+	IsFavorite bool `json:"isFavorite"`
 	Room       string
 	Cat        string
 	States     map[string]interface{} // Can be an array or a string
@@ -128,6 +129,7 @@ type Loxone struct {
 	socket          *websocket.Conn
 	disconnected    chan bool
 	stop            chan bool
+	hooks           map[string]func(*events.Event)
 
 	registerEvents bool
 }
@@ -182,6 +184,7 @@ func New(host string, user string, password string) (*Loxone, error) {
 		callbackChannel: make(chan *websocketResponse),
 		disconnected:    make(chan bool),
 		stop:            make(chan bool),
+		hooks:           make(map[string]func(*events.Event)),
 		socketMessage:   make(chan *[]byte),
 	}
 
@@ -267,6 +270,28 @@ func (l *Loxone) RegisterEvents() error {
 	}
 
 	return nil
+}
+
+// AddHook ask the loxone server to send events
+func (l *Loxone) AddHook(uuid string, callback func(*events.Event)) {
+	l.hooks[uuid] = callback
+}
+
+func (l *Loxone) PumpEvents(stop <-chan bool) {
+	go func() {
+		for {
+			select {
+			case <-stop:
+				log.Infof("Shutting Down")
+				return
+			case event := <-l.Events:
+				if hook, ok := l.hooks[event.UUID]; ok {
+					hook(event)
+				}
+				log.Debugf("event: %+v\n", event)
+			}
+		}
+	}()
 }
 
 // GetConfig get the loxone server config
