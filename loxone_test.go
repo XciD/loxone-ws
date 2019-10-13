@@ -68,3 +68,109 @@ func TestDeserializeLoxoneResponse(t *testing.T) {
 		t.Errorf("Error during code deserilization")
 	}
 }
+
+func TestConfig_CatName(t *testing.T) {
+	cfg := CreateConfig()
+	tests := []struct {
+		name string
+		key  interface{}
+		want string
+	}{
+		{
+			name: "Valid category",
+			key:  "test category key",
+			want: "test category name",
+		},
+		{
+			name: "Non existent category",
+			key:  "non existent key",
+			want: "",
+		},
+		{
+			name: "Nil category",
+			key:  nil,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cfg.CatName(tt.key); got != tt.want {
+				t.Errorf("Config.CatName() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfig_RoomName(t *testing.T) {
+	cfg := CreateConfig()
+	tests := []struct {
+		name string
+		key  interface{}
+		want string
+	}{
+		{
+			name: "Valid room",
+			key:  "test room key",
+			want: "test room name",
+		},
+		{
+			name: "Non existent room",
+			key:  "non existent key",
+			want: "",
+		},
+		{
+			name: "Nil room",
+			key:  nil,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cfg.RoomName(tt.key); got != tt.want {
+				t.Errorf("Config.RoomName() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func CreateConfig() *Config {
+	cfg := &Config{
+		LastModified: "not used in tests (yet?)",
+		MsInfo: map[string]interface{}{
+			"not used in tests (yet?)": nil,
+		},
+		GlobalStates: map[string]string{
+			"not used in tests (yet?)": "not used in tests (yet?)",
+		},
+		OperatingModes: map[string]interface{}{
+			"not used in tests (yet?)": nil,
+		},
+		Rooms: map[string]*Room{
+			"test room key": &Room{
+				Name: "test room name",
+				UUID: "not used in tests (yet?)",
+				Type: 0, //not used in tests (yet?)
+			},
+		},
+		Cats: map[string]*Category{
+			"test category key": &Category{
+				Name: "test category name",
+				UUID: "not used in tests (yet?)",
+				Type: "not used in tests (yet?)",
+			},
+		},
+		Controls: map[string]*Control{
+			"not used in tests (yet?)": &Control{
+				Name:       "not used in tests (yet?)",
+				Type:       "not used in tests (yet?)",
+				UUIDAction: "not used in tests (yet?)",
+				Room:       "not used in tests (yet?)",
+				Cat:        "not used in tests (yet?)",
+				States: map[string]interface{}{
+					"not used in tests (yet?)": "not used in tests (yet?)",
+				},
+			},
+		},
+	}
+	return cfg
+}
