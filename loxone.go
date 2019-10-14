@@ -116,22 +116,19 @@ type Category struct {
 
 // Loxone The loxone object exposed
 type Loxone struct {
-	host     string
-	user     string
-	password string
-	encrypt  *encrypt
-	token    *token
-	// Loxone Events received from the websockets
-	Events chan *events.Event
-
+	host            string
+	user            string
+	password        string
+	encrypt         *encrypt
+	token           *token
+	Events          chan *events.Event
 	callbackChannel chan *websocketResponse
 	socketMessage   chan *[]byte
 	socket          *websocket.Conn
 	disconnected    chan bool
 	stop            chan bool
 	hooks           map[string]func(*events.Event)
-
-	registerEvents bool
+	registerEvents  bool
 }
 
 type websocketResponse struct {
@@ -238,13 +235,13 @@ func (l *Loxone) handleReconnect() {
 			break
 		case <-l.disconnected:
 			for {
-				log.Warn("Disconnected, reconnecting")
+				log.Warn("Disconnected, reconnecting in 30s")
 				time.Sleep(30 * time.Second)
 
 				err := l.connect()
 
 				if err != nil {
-					log.Warn("Error during reconnection, retrying")
+					log.Warnf("Error during reconnection, retrying (%s)", err.Error())
 					continue
 				}
 
@@ -370,7 +367,7 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 }
 
 func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
-	log.Debug("Sending commande to WS")
+	log.Debug("Sending command to WS")
 	err := l.socket.WriteMessage(websocket.TextMessage, *cmd)
 
 	if err != nil {
@@ -468,6 +465,7 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 }
 
 func (l *Loxone) connectWs() error {
+	log.Info("Connecting to WS")
 	u := url.URL{Scheme: "ws", Host: l.host, Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
 
 	socket, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
@@ -483,7 +481,7 @@ func (l *Loxone) connectWs() error {
 
 func (l *Loxone) readPump() {
 	defer func() {
-		log.Info("Stopping pump")
+		log.Info("Stopping websocket pump")
 		defer l.socket.Close()
 	}()
 	log.Info("Starting websocket pump")
@@ -498,6 +496,7 @@ func (l *Loxone) readPump() {
 			break
 		}
 
+		log.Trace("Pushing new message from socket to socket channel")
 		l.socketMessage <- &message
 	}
 }
@@ -507,7 +506,7 @@ func (l *Loxone) handleMessages() {
 	var err error
 
 	defer func() {
-		log.Info("Stoping message handling")
+		log.Info("Stopping message handling")
 	}()
 
 	for {
@@ -515,6 +514,8 @@ func (l *Loxone) handleMessages() {
 		case <-l.stop:
 			break
 		case message := <-l.socketMessage:
+			log.Trace("Sub new message from socket channel")
+
 			// Check if we received an header or not
 			if len(*message) == 8 {
 				// we got an LX-Bin-header!
@@ -531,8 +532,7 @@ func (l *Loxone) handleMessages() {
 
 					if incomingData.EventType == events.EventTypeOutofservice {
 						log.Warn("Miniserver out of service!")
-						l.disconnected <- true
-						break
+						continue
 					}
 
 					if incomingData.EventType == events.EventTypeKeepalive {
@@ -567,7 +567,7 @@ func (l *Loxone) handleMessages() {
 
 				incomingData = events.EmptyHeader
 			} else {
-				log.Debug("Received binary message without header ")
+				log.Debug("Received binary message without header")
 				// TODO Send to error
 			}
 		}
@@ -587,9 +587,7 @@ func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSal
 	hash := strings.ToUpper(crypto.Sha1Hash(fmt.Sprintf("%s:%s", password, salt)))
 
 	// hash with user and otSalt
-	hash = crypto.ComputeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
-
-	return hash
+	return crypto.ComputeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
 }
 
 func (e *encrypt) getEncryptedCmd(cmd string, encryptType encryptType) ([]byte, error) {

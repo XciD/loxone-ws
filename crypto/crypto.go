@@ -101,6 +101,9 @@ func DecryptAES(cypherEncoded string, uniqueKey string, ivKey string) ([]byte, e
 
 func unpad(data []byte, blockSize int) (output []byte, err error) {
 	var dataLen = len(data)
+	if dataLen == 0 {
+		return output, errors.New("data is empty")
+	}
 	if dataLen%blockSize != 0 {
 		return output, errors.New("data's length isn't a multiple of blockSize")
 	}
