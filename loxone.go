@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/XciD/loxone-ws/crypto"
-	"github.com/XciD/loxone-ws/events"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -14,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/XciD/loxone-ws/crypto"
+	"github.com/XciD/loxone-ws/events"
 
 	"github.com/gorilla/websocket"
 	"github.com/mitchellh/mapstructure"
