@@ -1,4 +1,4 @@
-module github.com/XciD/loxone_ws
+module loxone-ws
 
 require (
 	github.com/gorilla/websocket v1.4.0

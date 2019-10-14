@@ -6,15 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"loxone-ws/crypto"
+	"loxone-ws/events"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/XciD/loxone_ws/crypto"
-	"github.com/XciD/loxone_ws/events"
 
 	"github.com/gorilla/websocket"
 	"github.com/mitchellh/mapstructure"
