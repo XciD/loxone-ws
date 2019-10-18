@@ -10,6 +10,13 @@ type FakeWebsocket struct {
 	commands []string
 }
 
+func NewFakeWebsocket() *FakeWebsocket {
+	return &FakeWebsocket{
+		hooks:    make(map[string]func(*events.Event)),
+		commands: make([]string, 0),
+	}
+}
+
 func (l *FakeWebsocket) AddHook(uuid string, callback func(*events.Event)) {
 	l.hooks[uuid] = callback
 }
