@@ -131,6 +131,15 @@ type Loxone struct {
 	registerEvents  bool
 }
 
+type WebsocketInterface interface {
+	AddHook(uuid string, callback func(*events.Event))
+	SendCommand(command string, class interface{}) (*Body, error)
+	Close()
+	RegisterEvents() error
+	PumpEvents(stop <-chan bool)
+	GetConfig() (*Config, error)
+}
+
 type websocketResponse struct {
 	data         *[]byte
 	responseType events.EventType
@@ -167,7 +176,7 @@ const (
 )
 
 // Connect to the loxone websocket
-func New(host string, user string, password string) (*Loxone, error) {
+func New(host string, user string, password string) (WebsocketInterface, error) {
 
 	// Check if all mandatory parameters were given
 	if host == "" {
