@@ -98,7 +98,7 @@ type Control struct {
 	Room       string
 	Cat        string
 	States     map[string]interface{} // Can be an array or a string
-	Details ControlDetails
+	Details    ControlDetails
 }
 
 // Details of a control
