@@ -138,6 +138,7 @@ type Loxone struct {
 }
 
 type WebsocketInterface interface {
+	GetEvents() chan *events.Event
 	AddHook(uuid string, callback func(*events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
 	Close()
@@ -177,7 +178,7 @@ type encryptType int32
 
 const (
 	none encryptType = 0
-	//request            encryptType = 1
+	// request            encryptType = 1
 	requestResponseVal encryptType = 2
 )
 
@@ -295,6 +296,10 @@ func (l *Loxone) RegisterEvents() error {
 // AddHook ask the loxone server to send events
 func (l *Loxone) AddHook(uuid string, callback func(*events.Event)) {
 	l.hooks[uuid] = callback
+}
+
+func (l *Loxone) GetEvents() chan *events.Event {
+	return l.Events
 }
 
 func (l *Loxone) PumpEvents(stop <-chan bool) {

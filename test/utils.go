@@ -33,6 +33,10 @@ func (l *FakeWebsocket) RegisterEvents() error {
 	return nil
 }
 
+func (l *FakeWebsocket) GetEvents() chan *events.Event {
+	return nil
+}
+
 func (l *FakeWebsocket) PumpEvents(stop <-chan bool) {
 
 }
