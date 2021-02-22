@@ -99,6 +99,53 @@ type Control struct {
 	Cat        string
 	States     map[string]interface{} // Can be an array or a string
 	Details    ControlDetails
+	Statistic  ControlStatistic
+}
+
+// StatisticalNames returns a list of names for the given control and
+// the statistical data the control writes. first we will loop over the
+// outputs values within the statistics of the control, trying to find
+// a state with a matching uuid. If no entry was found, we will use the
+// name of the statistic entry in the output array.
+func (cntl *Control) StatisticalNames() []string {
+	var names []string
+	// loop over the statistic outputs
+	for _, output := range cntl.Statistic.Outputs {
+		var name string
+		// loop over the states
+		for key, state := range cntl.States {
+			// now get the name of the state
+			// which matches and set it as name
+			if state == output.UUID {
+				name = key
+				break
+			}
+		}
+
+		// if the name wasn't found, use the
+		// name of the output from the statistic
+		if name == "" {
+			name = output.Name
+		}
+
+		// append the name
+		names = append(names, name)
+	}
+
+	return names
+}
+
+type ControlStatistic struct {
+	Frequency int                    `json:"frequency"`
+	Outputs   []ControlStatisticItem `json:"outputs"`
+}
+
+type ControlStatisticItem struct {
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	Format   string `json:"format"`
+	UUID     string `json:"uuid"`
+	VisuType int    `json:"visuType"`
 }
 
 // Details of a control
