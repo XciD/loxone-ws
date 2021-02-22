@@ -123,6 +123,7 @@ type Category struct {
 // Loxone The loxone object exposed
 type Loxone struct {
 	host            string
+	port            int
 	user            string
 	password        string
 	encrypt         *encrypt
@@ -183,7 +184,7 @@ const (
 )
 
 // Connect to the loxone websocket
-func New(host string, user string, password string) (WebsocketInterface, error) {
+func New(host string, port int, user string, password string) (WebsocketInterface, error) {
 
 	// Check if all mandatory parameters were given
 	if host == "" {
@@ -199,6 +200,7 @@ func New(host string, user string, password string) (WebsocketInterface, error) 
 	loxone := &Loxone{
 		Events:          make(chan *events.Event),
 		host:            host,
+		port:            port,
 		user:            user,
 		password:        password,
 		registerEvents:  false,
@@ -403,7 +405,7 @@ func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
 func (l *Loxone) authenticate() error {
 	// Retrieve public key
 	log.Info("Asking for Public Key")
-	publicKey, err := getPublicKeyFromServer(l.host)
+	publicKey, err := getPublicKeyFromServer(l.host, l.port)
 
 	if err != nil {
 		return err
@@ -486,7 +488,7 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 
 func (l *Loxone) connectWs() error {
 	log.Info("Connecting to WS")
-	u := url.URL{Scheme: "ws", Host: l.host, Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
+	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", l.host, l.port), Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
 
 	socket, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	l.socket = socket
@@ -636,9 +638,9 @@ func (e *encrypt) decryptCmd(cipherText []byte) ([]byte, error) {
 	return crypto.DecryptAES(string(cipherText), e.key, e.iv)
 }
 
-func getPublicKeyFromServer(url string) (*rsa.PublicKey, error) {
+func getPublicKeyFromServer(url string, port int) (*rsa.PublicKey, error) {
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s/%s", url, getPublicKey), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", url, port, getPublicKey), nil)
 	if err != nil {
 		return nil, err
 	}
