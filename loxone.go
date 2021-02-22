@@ -626,14 +626,17 @@ func (l *Loxone) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventTy
 }
 
 func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSalt string, hashAlg HashAlg) string {
+	//
 	var hash string
-	switch hashAlg {
+	passwordSalt := fmt.Sprintf("%s:%s", password, salt)
+
 	// create a SHA1/SHA256 hash of the (salted) password
+	switch hashAlg {
 	case SHA1:
-		hash = strings.ToUpper(crypto.Sha1Hash(fmt.Sprintf("%s:%s", password, salt)))
+		hash = strings.ToUpper(crypto.Sha1Hash(passwordSalt))
 		break
 	case SHA256:
-		hash = strings.ToUpper(crypto.Sha256Hash(fmt.Sprintf("%s:%s", password, salt)))
+		hash = strings.ToUpper(crypto.Sha256Hash(passwordSalt))
 		break
 	}
 
