@@ -635,8 +635,6 @@ func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSal
 	case SHA256:
 		hash = strings.ToUpper(crypto.Sha256Hash(fmt.Sprintf("%s:%s", password, salt)))
 		break
-	default:
-		hash = strings.ToUpper(crypto.Sha1Hash(fmt.Sprintf("%s:%s", password, salt)))
 	}
 
 	// hash with user and otSalt
