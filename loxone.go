@@ -136,8 +136,8 @@ func (cntl *Control) StatisticalNames() []string {
 }
 
 type ControlStatistic struct {
-	Frequency int `json:"frequency"`
-	Outputs   []ControlStatisticItem
+	Frequency int                    `json:"frequency"`
+	Outputs   []ControlStatisticItem `json:"outputs"`
 }
 
 type ControlStatisticItem struct {
