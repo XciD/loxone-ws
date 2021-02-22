@@ -123,7 +123,7 @@ type Category struct {
 // Loxone The loxone object exposed
 type Loxone struct {
 	host            string
-	port			int
+	port            int
 	user            string
 	password        string
 	encrypt         *encrypt
@@ -200,7 +200,7 @@ func New(host string, port int, user string, password string) (WebsocketInterfac
 	loxone := &Loxone{
 		Events:          make(chan *events.Event),
 		host:            host,
-		port:			 port,
+		port:            port,
 		user:            user,
 		password:        password,
 		registerEvents:  false,
