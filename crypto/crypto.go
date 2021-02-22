@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1" // #nosec
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -147,5 +148,15 @@ func Sha1Hash(data string) string {
 	if err != nil {
 		panic(err)
 	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func Sha256Hash(data string) string {
+	h := sha256.New()
+	_, err := h.Write([]byte(data))
+	if err != nil {
+		panic(err)
+	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
