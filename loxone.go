@@ -107,17 +107,18 @@ type Control struct {
 // outputs values within the statistics of the control, trying to find
 // a state with a matching uuid. If no entry was found, we will use the
 // name of the statistic entry in the output array.
-func (cntl *Control) StatisticalNames() (names []string) {
-	var name string
+func (cntl *Control) StatisticalNames() []string {
+	var names []string
 	// loop over the statistic outputs
 	for _, output := range cntl.Statistic.Outputs {
+		var name string
 		// loop over the states
 		for key, state := range cntl.States {
 			// now get the name of the state
 			// which matches and set it as name
 			if state == output.UUID {
 				name = key
-				continue
+				break
 			}
 		}
 
@@ -129,8 +130,6 @@ func (cntl *Control) StatisticalNames() (names []string) {
 
 		// append the name
 		names = append(names, name)
-		// reset name
-		name = ""
 	}
 
 	return names
