@@ -148,6 +148,16 @@ type ControlStatisticItem struct {
 	VisuType int    `json:"visuType"`
 }
 
+// GetControl returns the control with the given uuid
+func (cfg *Config) GetControl(uuid string) *Control {
+	for key, control := range cfg.Controls {
+		if key == uuid {
+			return control
+		}
+	}
+	return nil
+}
+
 // Details of a control
 type ControlDetails struct {
 	Format string
