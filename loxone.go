@@ -227,9 +227,28 @@ type token struct {
 	unsecurePass bool
 }
 
+// HashAlg defines the algorithm used to hash some user
+// information during token generation
+type HashAlg string
+
+const (
+	SHA1   = "SHA1"
+	SHA256 = "SHA256"
+)
+
+// Valid checks for valid & supported hash algorithms. The
+// value for the algorithm is returned by the miniserver within
+// the process of getting an auth-token and will be used for
+// hashing {password}:{userSalt} and {user}:{pwHash} within
+// createToken() / hashUser()
+func (ha HashAlg) Valid() bool {
+	return (ha == SHA1 || ha == SHA256) && len(ha) > 0
+}
+
 type salt struct {
-	OneTimeSalt string `mapstructure:"key"`
-	Salt        string `mapstructure:"Salt"`
+	OneTimeSalt   string  `mapstructure:"key"`
+	Salt          string  `mapstructure:"Salt"`
+	HashAlgorithm HashAlg `mapstructure:"hashAlg"`
 }
 
 type encryptType int32
@@ -528,7 +547,11 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 		return err
 	}
 
-	hash := l.encrypt.hashUser(user, password, salt.Salt, salt.OneTimeSalt)
+	if !salt.HashAlgorithm.Valid() {
+		return fmt.Errorf("unsupported hash alogrithm given. For now only '%s' and '%s' are supported", SHA1, SHA256)
+	}
+
+	hash := l.encrypt.hashUser(user, password, salt.Salt, salt.OneTimeSalt, salt.HashAlgorithm)
 
 	cmd = fmt.Sprintf(getToken, hash, user, 4, uniqueID, "GO")
 
@@ -661,9 +684,20 @@ func (l *Loxone) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventTy
 	}
 }
 
-func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSalt string) string {
-	// create a SHA1 hash of the (salted) password
-	hash := strings.ToUpper(crypto.Sha1Hash(fmt.Sprintf("%s:%s", password, salt)))
+func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSalt string, hashAlg HashAlg) string {
+	//
+	var hash string
+	passwordSalt := fmt.Sprintf("%s:%s", password, salt)
+
+	// create a SHA1/SHA256 hash of the (salted) password
+	switch hashAlg {
+	case SHA1:
+		hash = strings.ToUpper(crypto.Sha1Hash(passwordSalt))
+		break
+	case SHA256:
+		hash = strings.ToUpper(crypto.Sha256Hash(passwordSalt))
+		break
+	}
 
 	// hash with user and otSalt
 	return crypto.ComputeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
