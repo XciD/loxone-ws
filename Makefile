@@ -1,4 +1,3 @@
-BUILD_DIR 		:= build
 
 .DEFAULT_GOAL := build
 

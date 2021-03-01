@@ -91,15 +91,16 @@ func (cfg *Config) RoomName(key interface{}) string {
 
 // Control represent a control
 type Control struct {
-	Name       string
-	Type       string
-	UUIDAction string
-	IsFavorite bool `json:"isFavorite"`
-	Room       string
-	Cat        string
-	States     map[string]interface{} // Can be an array or a string
-	Details    ControlDetails
-	Statistic  ControlStatistic
+	Name        string
+	Type        string
+	UUIDAction  string
+	IsFavorite  bool `json:"isFavorite"`
+	Room        string
+	Cat         string
+	States      map[string]interface{} // Can be an array or a string
+	Details     ControlDetails
+	Statistic   ControlStatistic
+	SubControls map[string]*Control
 }
 
 // StatisticalNames returns a list of names for the given control and
@@ -108,7 +109,7 @@ type Control struct {
 // a state with a matching uuid. If no entry was found, we will use the
 // name of the statistic entry in the output array.
 func (cntl *Control) StatisticalNames() []string {
-	var names []string
+	names := make([]string, 0)
 	// loop over the statistic outputs
 	for _, output := range cntl.Statistic.Outputs {
 		var name string
@@ -178,7 +179,7 @@ type Category struct {
 }
 
 // Loxone The loxone object exposed
-type Loxone struct {
+type websocketImpl struct {
 	host            string
 	port            int
 	user            string
@@ -195,7 +196,7 @@ type Loxone struct {
 	registerEvents  bool
 }
 
-type WebsocketInterface interface {
+type Loxone interface {
 	GetEvents() chan *events.Event
 	AddHook(uuid string, callback func(*events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
@@ -260,7 +261,7 @@ const (
 )
 
 // Connect to the loxone websocket
-func New(host string, port int, user string, password string) (WebsocketInterface, error) {
+func New(host string, port int, user string, password string) (Loxone, error) {
 
 	// Check if all mandatory parameters were given
 	if host == "" {
@@ -273,7 +274,7 @@ func New(host string, port int, user string, password string) (WebsocketInterfac
 		return nil, errors.New("missing password")
 	}
 
-	loxone := &Loxone{
+	loxone := &websocketImpl{
 		Events:          make(chan *events.Event),
 		host:            host,
 		port:            port,
@@ -298,7 +299,7 @@ func New(host string, port int, user string, password string) (WebsocketInterfac
 	return loxone, nil
 }
 
-func (l *Loxone) connect() error {
+func (l *websocketImpl) connect() error {
 	err := l.connectWs()
 
 	if err != nil {
@@ -317,7 +318,7 @@ func (l *Loxone) connect() error {
 	return nil
 }
 
-func (l *Loxone) handleReconnect() {
+func (l *websocketImpl) handleReconnect() {
 	// If we finish, we restart a reconnect loop
 	defer func() {
 		log.Info("Stopping disconnect loop")
@@ -349,7 +350,7 @@ func (l *Loxone) handleReconnect() {
 	}
 }
 
-func (l *Loxone) Close() {
+func (l *websocketImpl) Close() {
 	defer func() {
 		l.socket.Close()
 	}()
@@ -359,7 +360,7 @@ func (l *Loxone) Close() {
 }
 
 // RegisterEvents ask the loxone server to send events
-func (l *Loxone) RegisterEvents() error {
+func (l *websocketImpl) RegisterEvents() error {
 	l.registerEvents = true
 
 	_, err := l.SendCommand(registerEvents, nil)
@@ -372,15 +373,15 @@ func (l *Loxone) RegisterEvents() error {
 }
 
 // AddHook ask the loxone server to send events
-func (l *Loxone) AddHook(uuid string, callback func(*events.Event)) {
+func (l *websocketImpl) AddHook(uuid string, callback func(*events.Event)) {
 	l.hooks[uuid] = callback
 }
 
-func (l *Loxone) GetEvents() chan *events.Event {
+func (l *websocketImpl) GetEvents() chan *events.Event {
 	return l.Events
 }
 
-func (l *Loxone) PumpEvents(stop <-chan bool) {
+func (l *websocketImpl) PumpEvents(stop <-chan bool) {
 	go func() {
 		for {
 			select {
@@ -398,7 +399,7 @@ func (l *Loxone) PumpEvents(stop <-chan bool) {
 }
 
 // GetConfig get the loxone server config
-func (l *Loxone) GetConfig() (*Config, error) {
+func (l *websocketImpl) GetConfig() (*Config, error) {
 	config := &Config{}
 
 	_, err := l.SendCommand(getConfig, config)
@@ -411,11 +412,11 @@ func (l *Loxone) GetConfig() (*Config, error) {
 }
 
 // SendCommand Send a command to the loxone server
-func (l *Loxone) SendCommand(cmd string, class interface{}) (*Body, error) {
+func (l *websocketImpl) SendCommand(cmd string, class interface{}) (*Body, error) {
 	return l.sendCmdWithEnc(cmd, none, class)
 }
 
-func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class interface{}) (*Body, error) {
+func (l *websocketImpl) sendCmdWithEnc(cmd string, encryptType encryptType, class interface{}) (*Body, error) {
 	encryptedCmd, err := l.encrypt.getEncryptedCmd(cmd, encryptType)
 
 	if err != nil {
@@ -464,7 +465,7 @@ func (l *Loxone) sendCmdWithEnc(cmd string, encryptType encryptType, class inter
 	return &Body{Code: 200}, nil
 }
 
-func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
+func (l *websocketImpl) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
 	log.Debug("Sending command to WS")
 	err := l.socket.WriteMessage(websocket.TextMessage, *cmd)
 
@@ -478,7 +479,7 @@ func (l *Loxone) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
 	return result, nil
 }
 
-func (l *Loxone) authenticate() error {
+func (l *websocketImpl) authenticate() error {
 	// Retrieve public key
 	log.Info("Asking for Public Key")
 	publicKey, err := getPublicKeyFromServer(l.host, l.port)
@@ -537,7 +538,7 @@ func (l *Loxone) authenticate() error {
 	return nil
 }
 
-func (l *Loxone) createToken(user string, password string, uniqueID string) error {
+func (l *websocketImpl) createToken(user string, password string, uniqueID string) error {
 	cmd := fmt.Sprintf(getUsersalt, user)
 
 	salt := &salt{}
@@ -548,7 +549,7 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 	}
 
 	if !salt.HashAlgorithm.Valid() {
-		return fmt.Errorf("unsupported hash alogrithm given. For now only '%s' and '%s' are supported", SHA1, SHA256)
+		return fmt.Errorf("unsupported hash algorithm given. For now only '%s' and '%s' are supported", SHA1, SHA256)
 	}
 
 	hash := l.encrypt.hashUser(user, password, salt.Salt, salt.OneTimeSalt, salt.HashAlgorithm)
@@ -566,7 +567,7 @@ func (l *Loxone) createToken(user string, password string, uniqueID string) erro
 	return nil
 }
 
-func (l *Loxone) connectWs() error {
+func (l *websocketImpl) connectWs() error {
 	log.Info("Connecting to WS")
 	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", l.host, l.port), Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
 
@@ -581,7 +582,7 @@ func (l *Loxone) connectWs() error {
 	return nil
 }
 
-func (l *Loxone) readPump() {
+func (l *websocketImpl) readPump() {
 	defer func() {
 		log.Info("Stopping websocket pump")
 		defer l.socket.Close()
@@ -603,7 +604,7 @@ func (l *Loxone) readPump() {
 	}
 }
 
-func (l *Loxone) handleMessages() {
+func (l *websocketImpl) handleMessages() {
 	incomingData := events.EmptyHeader
 	var err error
 
@@ -676,7 +677,7 @@ func (l *Loxone) handleMessages() {
 	}
 }
 
-func (l *Loxone) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventType) {
+func (l *websocketImpl) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventType) {
 	events := events.InitBinaryEvent(binaryEvent, eventType)
 
 	for _, event := range events.Events {
