@@ -37,7 +37,7 @@ func TestDeserializeLoxoneResponse(t *testing.T) {
 	json := []byte(`{"LL": {"value": "ok", "code": "200", "control": "test"}}`)
 
 	result := &SimpleValue{}
-	body, _ := deserializeLoxoneResponse(&json, result)
+	body, _ := deserializeLoxoneResponse(json, result)
 
 	if result.Value != "ok" {
 		t.Errorf("Error during value deserilization")
@@ -54,7 +54,7 @@ func TestDeserializeLoxoneResponse(t *testing.T) {
 	json = []byte(`{"LL": {"value": {"key": "ontTimeSalt", "Salt": "Salt"}, "code": 200, "control": "test"}}`)
 
 	resultSalt := &salt{}
-	body, _ = deserializeLoxoneResponse(&json, resultSalt)
+	body, _ = deserializeLoxoneResponse(json, resultSalt)
 
 	if resultSalt.Salt != "Salt" {
 		t.Errorf("Error during Salt value deserilization")

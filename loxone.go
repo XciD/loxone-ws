@@ -186,19 +186,19 @@ type websocketImpl struct {
 	password        string
 	encrypt         *encrypt
 	token           *token
-	Events          chan *events.Event
+	Events          chan events.Event
 	callbackChannel chan *websocketResponse
-	socketMessage   chan *[]byte
+	socketMessage   chan []byte
 	socket          *websocket.Conn
 	disconnected    chan bool
 	stop            chan bool
-	hooks           map[string]func(*events.Event)
+	hooks           map[string]func(events.Event)
 	registerEvents  bool
 }
 
 type Loxone interface {
-	GetEvents() chan *events.Event
-	AddHook(uuid string, callback func(*events.Event))
+	GetEvents() chan events.Event
+	AddHook(uuid string, callback func(events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
 	Close()
 	RegisterEvents() error
@@ -207,7 +207,7 @@ type Loxone interface {
 }
 
 type websocketResponse struct {
-	data         *[]byte
+	data         []byte
 	responseType events.EventType
 }
 
@@ -275,7 +275,7 @@ func New(host string, port int, user string, password string) (Loxone, error) {
 	}
 
 	loxone := &websocketImpl{
-		Events:          make(chan *events.Event),
+		Events:          make(chan events.Event),
 		host:            host,
 		port:            port,
 		user:            user,
@@ -284,8 +284,8 @@ func New(host string, port int, user string, password string) (Loxone, error) {
 		callbackChannel: make(chan *websocketResponse),
 		disconnected:    make(chan bool),
 		stop:            make(chan bool),
-		hooks:           make(map[string]func(*events.Event)),
-		socketMessage:   make(chan *[]byte),
+		hooks:           make(map[string]func(events.Event)),
+		socketMessage:   make(chan []byte),
 	}
 
 	go loxone.handleMessages()
@@ -373,11 +373,11 @@ func (l *websocketImpl) RegisterEvents() error {
 }
 
 // AddHook ask the loxone server to send events
-func (l *websocketImpl) AddHook(uuid string, callback func(*events.Event)) {
+func (l *websocketImpl) AddHook(uuid string, callback func(events.Event)) {
 	l.hooks[uuid] = callback
 }
 
-func (l *websocketImpl) GetEvents() chan *events.Event {
+func (l *websocketImpl) GetEvents() chan events.Event {
 	return l.Events
 }
 
@@ -431,11 +431,11 @@ func (l *websocketImpl) sendCmdWithEnc(cmd string, encryptType encryptType, clas
 
 	if encryptType == requestResponseVal {
 		// We need to decrypt
-		decryptedResult, err := l.encrypt.decryptCmd(*result.data)
+		decryptedResult, err := l.encrypt.decryptCmd(result.data)
 		if err != nil {
 			return nil, err
 		}
-		result.data = &decryptedResult
+		result.data = decryptedResult
 	}
 
 	if class != nil {
@@ -451,7 +451,7 @@ func (l *websocketImpl) sendCmdWithEnc(cmd string, encryptType encryptType, clas
 			}
 			return body, nil
 		} else if result.responseType == events.EventTypeFile {
-			err := json.Unmarshal(*result.data, &class)
+			err := json.Unmarshal(result.data, &class)
 			if err != nil {
 				return nil, err
 			}
@@ -461,7 +461,7 @@ func (l *websocketImpl) sendCmdWithEnc(cmd string, encryptType encryptType, clas
 		return nil, fmt.Errorf("unHandled response type: %d", result.responseType)
 	}
 
-	log.Debug(string(*result.data))
+	log.Debug(string(result.data))
 	return &Body{Code: 200}, nil
 }
 
@@ -600,7 +600,7 @@ func (l *websocketImpl) readPump() {
 		}
 
 		log.Trace("Pushing new message from socket to socket channel")
-		l.socketMessage <- &message
+		l.socketMessage <- message
 	}
 }
 
@@ -620,9 +620,9 @@ func (l *websocketImpl) handleMessages() {
 			log.Trace("Sub new message from socket channel")
 
 			// Check if we received an header or not
-			if len(*message) == 8 {
+			if len(message) == 8 {
 				// we got an LX-Bin-header!
-				incomingData, err = events.IdentifyHeader(*message)
+				incomingData, err = events.IdentifyHeader(message)
 				if err != nil {
 					log.Debugf("Error during identify header %v", err)
 					incomingData = events.EmptyHeader
@@ -647,7 +647,7 @@ func (l *websocketImpl) handleMessages() {
 					continue
 				}
 
-			} else if !incomingData.Empty && incomingData.Length == len(*message) {
+			} else if !incomingData.Empty && incomingData.Length == len(message) {
 				// Received message
 				switch incomingData.EventType {
 				case events.EventTypeText:
@@ -677,7 +677,7 @@ func (l *websocketImpl) handleMessages() {
 	}
 }
 
-func (l *websocketImpl) handleBinaryEvent(binaryEvent *[]byte, eventType events.EventType) {
+func (l *websocketImpl) handleBinaryEvent(binaryEvent []byte, eventType events.EventType) {
 	events := events.InitBinaryEvent(binaryEvent, eventType)
 
 	for _, event := range events.Events {
@@ -755,7 +755,7 @@ func getPublicKeyFromServer(url string, port int) (*rsa.PublicKey, error) {
 	}
 
 	publicKey := &SimpleValue{}
-	_, err = deserializeLoxoneResponse(&body, publicKey)
+	_, err = deserializeLoxoneResponse(body, publicKey)
 
 	if err != nil {
 		return nil, err
@@ -768,9 +768,9 @@ func getPublicKeyFromServer(url string, port int) (*rsa.PublicKey, error) {
 	return crypto.BytesToPublicKey(publicKey.Value)
 }
 
-func deserializeLoxoneResponse(jsonBytes *[]byte, class interface{}) (*Body, error) {
+func deserializeLoxoneResponse(jsonBytes []byte, class interface{}) (*Body, error) {
 	raw := make(map[string]interface{})
-	err := json.Unmarshal(*jsonBytes, &raw)
+	err := json.Unmarshal(jsonBytes, &raw)
 	if err != nil {
 		return nil, err
 	}

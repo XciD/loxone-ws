@@ -12,14 +12,16 @@ import (
 
 // Event represent a Loxone EventTypeEvent with an UUID and a Value
 type Event struct {
-	UUID  string
-	Value float64
+	UUID     string
+	UUIDIcon string
+	Value    float64
+	Text     string
 }
 
 type BinaryEvent struct {
 	EventType EventType
-	Events    []*Event
-	Data      *[]byte
+	Events    []Event
+	Data      []byte
 }
 
 type Header struct {
@@ -44,16 +46,47 @@ const (
 	EventTypeWeather      EventType = 7
 )
 
-func (e *BinaryEvent) readEventText(bytes *[]byte) {
-	// TODO
+func (e *BinaryEvent) readEventText(data []byte) {
+	reader := bytes.NewReader(data)
+	events := make([]Event, 0)
+	for {
+		uuidChunk := make([]byte, 36)
+
+		if _, err := reader.Read(uuidChunk); err == io.EOF {
+			break
+		}
+
+		textSize := binary.LittleEndian.Uint32(uuidChunk[32:36])
+
+		padding := textSize % 4
+
+		nextSize := binary.LittleEndian.Uint32(uuidChunk[32:36])
+
+		if padding > 0 {
+			nextSize = nextSize + 4 - padding
+		}
+
+		textChunk := make([]byte, nextSize)
+
+		if _, err := reader.Read(textChunk); err == io.EOF {
+			break
+		}
+
+		events = append(events, Event{
+			UUID:     readUUID(uuidChunk[0:16]),
+			UUIDIcon: readUUID(uuidChunk[16:32]),
+			Text:     string(textChunk[0:textSize]),
+		})
+	}
+
+	e.Events = events
 }
 
-func (e *BinaryEvent) readEvent(dataRef *[]byte) {
-	data := *dataRef
+func (e *BinaryEvent) readEvent(data []byte) {
 	reader := bytes.NewReader(data)
 	// 1 EventTypeEvent = 24 Bytes
 	p := make([]byte, 24)
-	events := make([]*Event, 0)
+	events := make([]Event, 0)
 	for {
 		n, err := reader.Read(p)
 		if err == io.EOF {
@@ -65,10 +98,10 @@ func (e *BinaryEvent) readEvent(dataRef *[]byte) {
 	e.Events = events
 }
 
-func createEvent(eventRaw []byte) *Event {
+func createEvent(eventRaw []byte) Event {
 	uuid := readUUID(eventRaw[0:16])
 	value := math.Float64frombits(binary.LittleEndian.Uint64(eventRaw[16:24]))
-	return &Event{
+	return Event{
 		UUID:  uuid,
 		Value: value,
 	}
@@ -93,7 +126,7 @@ func IdentifyHeader(bytes []byte) (*Header, error) {
 	}, nil
 }
 
-func InitBinaryEvent(bytes *[]byte, eventType EventType) *BinaryEvent {
+func InitBinaryEvent(bytes []byte, eventType EventType) *BinaryEvent {
 	binaryEvent := &BinaryEvent{EventType: eventType}
 
 	switch eventType {
