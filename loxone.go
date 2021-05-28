@@ -327,7 +327,7 @@ func (l *websocketImpl) handleReconnect() {
 	for {
 		select {
 		case <-l.stop:
-			break
+			return
 		case <-l.disconnected:
 			for {
 				log.Warn("Disconnected, reconnecting in 30s")
@@ -345,7 +345,7 @@ func (l *websocketImpl) handleReconnect() {
 				}
 				break
 			}
-			break
+			return
 		}
 	}
 }
