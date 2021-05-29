@@ -832,16 +832,23 @@ func getPublicKeyFromServer(url string, port int) (*rsa.PublicKey, error) {
 	return crypto.BytesToPublicKey(publicKey.Value)
 }
 
-func deserializeLoxoneResponse(jsonBytes []byte, class interface{}) (*Body, error) {
+func deserializeLoxoneResponse(jsonBytes []byte, class interface{}) (body *Body, err error) {
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New(fmt.Sprintf("failed to deserialize Miniserver response in to the provided struct, %s", r))
+		}
+	}()
+
 	raw := make(map[string]interface{})
-	err := json.Unmarshal(jsonBytes, &raw)
+	err = json.Unmarshal(jsonBytes, &raw)
 	if err != nil {
-		return nil, err
+		return
 	}
 
 	ll := raw["LL"].(map[string]interface{})
 
-	body := &Body{Control: ll["control"].(string)}
+	body = &Body{Control: ll["control"].(string)}
 
 	var code interface{}
 	// If can be on Code or code...
@@ -867,12 +874,12 @@ func deserializeLoxoneResponse(jsonBytes []byte, class interface{}) (*Body, erro
 		rv := reflect.ValueOf(class).Elem()
 		rv.FieldByName("Value").SetString(ll["value"].(string))
 	case map[string]interface{}:
-		err := mapstructure.Decode(ll["value"], &class)
+		err = mapstructure.Decode(ll["value"], &class)
 
 		if err != nil {
-			return nil, err
+			return
 		}
 	}
 
-	return body, nil
+	return
 }
