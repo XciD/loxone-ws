@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/XciD/loxone-ws/crypto"
@@ -180,20 +181,21 @@ type Category struct {
 
 // Loxone The loxone object exposed
 type websocketImpl struct {
-	host            string
-	port            int
-	user            string
-	password        string
-	encrypt         *encrypt
-	token           *token
-	Events          chan events.Event
-	callbackChannel chan *websocketResponse
-	socketMessage   chan []byte
-	socket          *websocket.Conn
-	disconnected    chan bool
-	stop            chan bool
-	hooks           map[string]func(events.Event)
-	registerEvents  bool
+	host              string
+	port              int
+	user              string
+	password          string
+	encrypt           *encrypt
+	token             *token
+	Events            chan events.Event
+	callbackChannel   chan *websocketResponse
+	socketMessage     chan []byte
+	socket            *websocket.Conn
+	disconnected      chan bool
+	stop              chan bool
+	hooks             map[string]func(events.Event)
+	registerEvents    bool
+	reconnectHandlers int32
 }
 
 type Loxone interface {
@@ -275,17 +277,18 @@ func New(host string, port int, user string, password string) (Loxone, error) {
 	}
 
 	loxone := &websocketImpl{
-		Events:          make(chan events.Event),
-		host:            host,
-		port:            port,
-		user:            user,
-		password:        password,
-		registerEvents:  false,
-		callbackChannel: make(chan *websocketResponse),
-		disconnected:    make(chan bool),
-		stop:            make(chan bool),
-		hooks:           make(map[string]func(events.Event)),
-		socketMessage:   make(chan []byte),
+		Events:            make(chan events.Event),
+		host:              host,
+		port:              port,
+		user:              user,
+		password:          password,
+		registerEvents:    false,
+		callbackChannel:   make(chan *websocketResponse),
+		disconnected:      make(chan bool),
+		stop:              make(chan bool),
+		hooks:             make(map[string]func(events.Event)),
+		socketMessage:     make(chan []byte),
+		reconnectHandlers: 0,
 	}
 
 	go loxone.handleMessages()
@@ -321,8 +324,11 @@ func (l *websocketImpl) connect() error {
 func (l *websocketImpl) handleReconnect() {
 	// If we finish, we restart a reconnect loop
 	defer func() {
+		atomic.AddInt32(&l.reconnectHandlers, -1)
 		log.Info("Stopping disconnect loop")
 	}()
+
+	atomic.AddInt32(&l.reconnectHandlers, 1)
 
 	for {
 		select {
@@ -348,6 +354,7 @@ func (l *websocketImpl) handleReconnect() {
 			return
 		}
 	}
+
 }
 
 func (l *websocketImpl) Close() {
@@ -592,7 +599,10 @@ func (l *websocketImpl) readPump() {
 	for {
 		_, message, err := l.socket.ReadMessage()
 		if err != nil {
-			l.disconnected <- true
+			// using atomic instead of buffered channel in case we allow disabling auto reconnect in the future
+			if handlers := atomic.LoadInt32(&l.reconnectHandlers); handlers > 0 {
+				l.disconnected <- true
+			}
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
@@ -615,7 +625,7 @@ func (l *websocketImpl) handleMessages() {
 	for {
 		select {
 		case <-l.stop:
-			break
+			return
 		case message := <-l.socketMessage:
 			log.Trace("Sub new message from socket channel")
 
