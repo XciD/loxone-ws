@@ -196,12 +196,15 @@ type websocketImpl struct {
 	hooks             map[string]func(events.Event)
 	registerEvents    bool
 	reconnectHandlers int32
+	autoReconnect     bool
+	reconnectTimeout  time.Duration
 }
 
 type Loxone interface {
 	GetEvents() chan events.Event
 	AddHook(uuid string, callback func(events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
+	SendEncryptedCommand(command string, class interface{}) (*Body, error)
 	Close()
 	RegisterEvents() error
 	PumpEvents(stop <-chan bool)
@@ -262,8 +265,34 @@ const (
 	requestResponseVal encryptType = 2
 )
 
-// Connect to the loxone websocket
-func New(host string, port int, user string, password string) (Loxone, error) {
+type WebsocketOption func(*websocketImpl)
+
+func WithAutoReconnect(autoReconnect bool) WebsocketOption {
+	return func(ws *websocketImpl) {
+		ws.autoReconnect = autoReconnect
+	}
+}
+
+func WithReconnectTimeout(timeout time.Duration) WebsocketOption {
+	return func(ws *websocketImpl) {
+		ws.reconnectTimeout = timeout
+	}
+}
+
+func WithRegisterEvents() WebsocketOption {
+	return func(ws *websocketImpl) {
+		ws.registerEvents = true
+	}
+}
+
+func WithPort(port int) WebsocketOption {
+	return func(ws *websocketImpl) {
+		ws.port = port
+	}
+}
+
+// New creates a websocket and connects to the Miniserver
+func New(host string, user string, password string, opts ...WebsocketOption) (Loxone, error) {
 
 	// Check if all mandatory parameters were given
 	if host == "" {
@@ -279,7 +308,7 @@ func New(host string, port int, user string, password string) (Loxone, error) {
 	loxone := &websocketImpl{
 		Events:            make(chan events.Event),
 		host:              host,
-		port:              port,
+		port:              80,
 		user:              user,
 		password:          password,
 		registerEvents:    false,
@@ -289,6 +318,13 @@ func New(host string, port int, user string, password string) (Loxone, error) {
 		hooks:             make(map[string]func(events.Event)),
 		socketMessage:     make(chan []byte),
 		reconnectHandlers: 0,
+		autoReconnect:     true,
+		reconnectTimeout:  30 * time.Second,
+	}
+
+	// Loop through each option
+	for _, opt := range opts {
+		opt(loxone)
 	}
 
 	go loxone.handleMessages()
@@ -312,7 +348,13 @@ func (l *websocketImpl) connect() error {
 	err = l.authenticate()
 
 	if err != nil {
+		// if auth fails on a reconnect, there's no point in trying any more, assume password changed?
 		return err
+	}
+
+	if l.registerEvents {
+		// handle this error?
+		_ = l.RegisterEvents()
 	}
 
 	// Handle disconnected
@@ -329,15 +371,22 @@ func (l *websocketImpl) handleReconnect() {
 	}()
 
 	atomic.AddInt32(&l.reconnectHandlers, 1)
+	log.Info("Starting disconnect loop")
 
 	for {
 		select {
 		case <-l.stop:
 			return
 		case <-l.disconnected:
+
+			if !l.autoReconnect {
+				close(l.stop)
+				return
+			}
+
 			for {
-				log.Warn("Disconnected, reconnecting in 30s")
-				time.Sleep(30 * time.Second)
+				log.Warnf("Disconnected, reconnecting in %s", l.reconnectTimeout)
+				time.Sleep(l.reconnectTimeout)
 
 				err := l.connect()
 
@@ -346,9 +395,6 @@ func (l *websocketImpl) handleReconnect() {
 					continue
 				}
 
-				if l.registerEvents {
-					_ = l.RegisterEvents()
-				}
 				break
 			}
 			return
@@ -357,6 +403,7 @@ func (l *websocketImpl) handleReconnect() {
 
 }
 
+// Close closes the connection to the Miniserver
 func (l *websocketImpl) Close() {
 	defer func() {
 		l.socket.Close()
@@ -384,10 +431,12 @@ func (l *websocketImpl) AddHook(uuid string, callback func(events.Event)) {
 	l.hooks[uuid] = callback
 }
 
+// GetEvents returns the events channel
 func (l *websocketImpl) GetEvents() chan events.Event {
 	return l.Events
 }
 
+// PumpEvents starts processing events to trigger registered hooks
 func (l *websocketImpl) PumpEvents(stop <-chan bool) {
 	go func() {
 		for {
@@ -418,9 +467,14 @@ func (l *websocketImpl) GetConfig() (*Config, error) {
 	return config, nil
 }
 
-// SendCommand Send a command to the loxone server
+// SendCommand Send an unencrypted command to the loxone server
 func (l *websocketImpl) SendCommand(cmd string, class interface{}) (*Body, error) {
 	return l.sendCmdWithEnc(cmd, none, class)
+}
+
+// SendEncryptedCommand Send an encrypted command to the Miniserver
+func (l *websocketImpl) SendEncryptedCommand(cmd string, class interface{}) (*Body, error) {
+	return l.sendCmdWithEnc(cmd, requestResponseVal, class)
 }
 
 func (l *websocketImpl) sendCmdWithEnc(cmd string, encryptType encryptType, class interface{}) (*Body, error) {
@@ -599,7 +653,7 @@ func (l *websocketImpl) readPump() {
 	for {
 		_, message, err := l.socket.ReadMessage()
 		if err != nil {
-			// using atomic instead of buffered channel in case we allow disabling auto reconnect in the future
+			// ensure there is a reconnect handler running to prevent hang
 			if handlers := atomic.LoadInt32(&l.reconnectHandlers); handlers > 0 {
 				l.disconnected <- true
 			}
