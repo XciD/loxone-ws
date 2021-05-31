@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,20 +19,26 @@ import (
 	"github.com/XciD/loxone-ws/events"
 
 	"github.com/gorilla/websocket"
+	"github.com/hashicorp/go-version"
+	"github.com/lestrrat-go/jwx/jwt"
 	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
+	getApikey                    = "jdev/cfg/apiKey"
 	getPublicKey                 = "jdev/sys/getPublicKey"
 	keyExchange                  = "jdev/sys/keyexchange/%s"
 	getUsersalt                  = "jdev/sys/getkey2/%s"
 	getToken                     = "jdev/sys/gettoken/%s/%s/%d/%s/%s" // #nosec
+	getJwt                       = "jdev/sys/getjwt/%s/%s/%d/%s/%s"
+	authWithToken                = "authwithtoken/%s/%s"
 	aesPayload                   = "salt/%s/%s"
 	encryptionCmd                = "jdev/sys/enc/%s"
 	encryptionCommandAndResponse = "jdev/sys/fenc/%s"
 	registerEvents               = "jdev/sps/enablebinstatusupdate"
 	getConfig                    = "data/LoxAPP3.json"
+	MiniserverEpochOffset        = 1230768000
 )
 
 // Body response form command sent by ws
@@ -160,7 +167,7 @@ func (cfg *Config) GetControl(uuid string) *Control {
 	return nil
 }
 
-// Details of a control
+// ControlDetails details of a control
 type ControlDetails struct {
 	Format string
 }
@@ -198,13 +205,37 @@ type websocketImpl struct {
 	reconnectHandlers int32
 	autoReconnect     bool
 	reconnectTimeout  time.Duration
+	socketMu          sync.Mutex
+
+	// Miniserver capabilities
+	httpsSupported bool // in jdev/cfg/apiKey response (httpsStatus: 1 Supported, 2 Supported but expired)
+	useJwt         bool // 10.1.12.5
+	useSHA256      bool // 10.4.0.0
+
 }
 
+// we only support token auth so assume min version 9.0.7.25 for this library
+
+/*
+TOKEN_CFG_VERSION: "8.4.5.10",
+ENCRYPTION_CFG_VERSION: "8.1.10.14",
+TOKENS: "9.0.7.25",
+NON_TOKEN_AUTH_SUPPORTED: "9.3.0.0",
+ENCRYPTED_SOCKET_CONNECTION: "7.4.4.1",
+ENCRYPTED_CONNECTION_FULLY: "8.1.10.14",
+ENCRYPTED_CONNECTION_HTTP_USER: "8.1.10.4",
+TOKEN_REFRESH_AND_CHECK: "10.0.9.13",       // Tokens may now change when being refreshed. New webservice for checking token validity without changing them introduced
+SECURE_HTTP_REQUESTS: "7.1.9.17",
+JWT_SUPPORT: "10.1.12.5",                   // From this version onwards, JWTs are handled using separate commands to ensure regular apps remain unchanged.
+SHA_256: "10.4.0.0"
+*/
+
 type Loxone interface {
-	GetEvents() chan events.Event
+	GetEvents() <-chan events.Event
 	AddHook(uuid string, callback func(events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
 	SendEncryptedCommand(command string, class interface{}) (*Body, error)
+	GetFile(filename string) ([]byte, error)
 	Close()
 	RegisterEvents() error
 	PumpEvents(stop <-chan bool)
@@ -217,20 +248,25 @@ type websocketResponse struct {
 }
 
 type encrypt struct {
-	publicKey   *rsa.PublicKey
-	key         string
-	iv          string
-	timestamp   time.Time
-	oneTimeSalt string
-	salt        string
+	publicKey *rsa.PublicKey
+	key       string
+	iv        string
+	timestamp time.Time
+	salt      string
 }
 
 type token struct {
-	token        string
-	key          string
-	validUntil   int64
-	tokenRights  int32
-	unsecurePass bool
+	Token        string
+	Key          string
+	ValidUntil   int64
+	TokenRights  int32
+	UnsecurePass bool
+}
+
+func (t *token) IsValid() bool {
+	epoch := t.ValidUntil + MiniserverEpochOffset - 30 // 30 second buffer before expiration
+	validTil := time.Unix(epoch, 0)
+	return time.Now().Before(validTil)
 }
 
 // HashAlg defines the algorithm used to hash some user
@@ -238,8 +274,8 @@ type token struct {
 type HashAlg string
 
 const (
-	SHA1   = "SHA1"
-	SHA256 = "SHA256"
+	SHA1   HashAlg = "SHA1"
+	SHA256 HashAlg = "SHA256"
 )
 
 // Valid checks for valid & supported hash algorithms. The
@@ -260,57 +296,108 @@ type salt struct {
 type encryptType int32
 
 const (
-	none encryptType = 0
-	// request            encryptType = 1
+	none               encryptType = 0
+	request            encryptType = 1
 	requestResponseVal encryptType = 2
 )
 
-type WebsocketOption func(*websocketImpl)
+type WebsocketOption func(*websocketImpl) error
 
 func WithAutoReconnect(autoReconnect bool) WebsocketOption {
-	return func(ws *websocketImpl) {
+	return func(ws *websocketImpl) error {
 		ws.autoReconnect = autoReconnect
+		return nil
 	}
 }
 
 func WithReconnectTimeout(timeout time.Duration) WebsocketOption {
-	return func(ws *websocketImpl) {
+	return func(ws *websocketImpl) error {
 		ws.reconnectTimeout = timeout
+		return nil
 	}
 }
 
 func WithRegisterEvents() WebsocketOption {
-	return func(ws *websocketImpl) {
+	return func(ws *websocketImpl) error {
 		ws.registerEvents = true
+		return nil
 	}
 }
 
 func WithPort(port int) WebsocketOption {
-	return func(ws *websocketImpl) {
+	return func(ws *websocketImpl) error {
 		ws.port = port
+		return nil
+	}
+}
+
+func WithUsernameAndPassword(username string, password string) WebsocketOption {
+	return func(ws *websocketImpl) error {
+		if ws.user != "" && ws.user != username {
+			return errors.New("the username you specified in WithUsernameAndPassword() doesn't match that of the token you provided")
+		}
+		ws.user = username
+		ws.password = password
+		return nil
+	}
+}
+
+func WithJWTToken(tokenString string) WebsocketOption {
+	return func(ws *websocketImpl) error {
+
+		jwtToken, err := jwt.Parse([]byte(tokenString))
+		if err != nil {
+			return err
+		}
+
+		loxoneToken := &token{
+			Token: tokenString,
+		}
+
+		exp := jwtToken.Expiration()
+		if !exp.IsZero() {
+			loxoneToken.ValidUntil = exp.Unix() - MiniserverEpochOffset
+		}
+
+		if rights, exists := jwtToken.Get("tokenRights"); exists {
+			if rightsInt, ok := rights.(int32); ok {
+				loxoneToken.TokenRights = rightsInt
+			}
+		}
+
+		if username, exists := jwtToken.Get("user"); exists {
+			if username, ok := username.(string); ok {
+
+				if ws.user != "" && ws.user != username {
+					return errors.New("the username you specified in WithUsernameAndPassword() doesn't match that of the token you provided")
+				}
+
+				ws.user = username
+			}
+		}
+
+		if ws.user == "" {
+			return errors.New("could not infer the user from the token")
+		}
+
+		ws.token = loxoneToken
+
+		return nil
 	}
 }
 
 // New creates a websocket and connects to the Miniserver
-func New(host string, user string, password string, opts ...WebsocketOption) (Loxone, error) {
+func New(host string, opts ...WebsocketOption) (Loxone, error) {
 
 	// Check if all mandatory parameters were given
 	if host == "" {
 		return nil, errors.New("missing host")
-	}
-	if user == "" {
-		return nil, errors.New("missing user")
-	}
-	if password == "" {
-		return nil, errors.New("missing password")
 	}
 
 	loxone := &websocketImpl{
 		Events:            make(chan events.Event),
 		host:              host,
 		port:              80,
-		user:              user,
-		password:          password,
 		registerEvents:    false,
 		callbackChannel:   make(chan *websocketResponse),
 		disconnected:      make(chan bool),
@@ -320,11 +407,20 @@ func New(host string, user string, password string, opts ...WebsocketOption) (Lo
 		reconnectHandlers: 0,
 		autoReconnect:     true,
 		reconnectTimeout:  30 * time.Second,
+		useJwt:            true,
+		useSHA256:         true,
 	}
 
 	// Loop through each option
 	for _, opt := range opts {
-		opt(loxone)
+		err := opt(loxone)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if loxone.token == nil && (loxone.user == "" || loxone.password == "") {
+		return nil, errors.New("you must specify at least one of WithUsernameAndPassword() or WithJWTToken() options")
 	}
 
 	go loxone.handleMessages()
@@ -339,7 +435,15 @@ func New(host string, user string, password string, opts ...WebsocketOption) (Lo
 }
 
 func (l *websocketImpl) connect() error {
-	err := l.connectWs()
+
+	// this is recommended to be done first by docs, gives MS version and HTTPS status
+	log.Info("Asking for API Key, Version, and HTTPS Status ")
+	err := l.getMiniserverCapabilities()
+	if err != nil {
+		return err
+	}
+
+	err = l.connectWs()
 
 	if err != nil {
 		return err
@@ -405,15 +509,20 @@ func (l *websocketImpl) handleReconnect() {
 
 // Close closes the connection to the Miniserver
 func (l *websocketImpl) Close() {
-	defer func() {
-		l.socket.Close()
-	}()
-
 	close(l.stop)
-	_ = l.socket.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = l.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	_ = l.socket.Close()
 }
 
-// RegisterEvents ask the loxone server to send events
+func (l *websocketImpl) write(messageType int, data []byte) error {
+	// as per https://pkg.go.dev/github.com/gorilla/websocket#hdr-Concurrency ensuring one concurrent write
+	// another option is to set up a write pump, we can't assume user isn't using goroutines to issue commands
+	l.socketMu.Lock()
+	defer l.socketMu.Unlock()
+	return l.socket.WriteMessage(messageType, data)
+}
+
+// RegisterEvents ask the Miniserver to send events
 func (l *websocketImpl) RegisterEvents() error {
 	l.registerEvents = true
 
@@ -426,13 +535,13 @@ func (l *websocketImpl) RegisterEvents() error {
 	return nil
 }
 
-// AddHook ask the loxone server to send events
+// AddHook add a hook for a specific control, assumed at most one hook per uuid
 func (l *websocketImpl) AddHook(uuid string, callback func(events.Event)) {
 	l.hooks[uuid] = callback
 }
 
-// GetEvents returns the events channel
-func (l *websocketImpl) GetEvents() chan events.Event {
+// GetEvents returns the events in a receive only channel
+func (l *websocketImpl) GetEvents() <-chan events.Event {
 	return l.Events
 }
 
@@ -454,7 +563,7 @@ func (l *websocketImpl) PumpEvents(stop <-chan bool) {
 	}()
 }
 
-// GetConfig get the loxone server config
+// GetConfig get the Miniserver config
 func (l *websocketImpl) GetConfig() (*Config, error) {
 	config := &Config{}
 
@@ -467,7 +576,20 @@ func (l *websocketImpl) GetConfig() (*Config, error) {
 	return config, nil
 }
 
-// SendCommand Send an unencrypted command to the loxone server
+func (l *websocketImpl) GetFile(filename string) ([]byte, error) {
+	// TODO open up a second socket for this to not block events
+	bytes := []byte(filename)
+	res, err := l.sendSocketCmd(&bytes)
+	if err != nil {
+		return nil, err
+	}
+	if res.responseType != events.EventTypeFile {
+		return nil, errors.New("request is not a binary file or it doesn't exist")
+	}
+	return res.data, nil
+}
+
+// SendCommand Send an unencrypted command to the Miniserver
 func (l *websocketImpl) SendCommand(cmd string, class interface{}) (*Body, error) {
 	return l.sendCmdWithEnc(cmd, none, class)
 }
@@ -528,9 +650,8 @@ func (l *websocketImpl) sendCmdWithEnc(cmd string, encryptType encryptType, clas
 
 func (l *websocketImpl) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
 	log.Debug("Sending command to WS")
-	err := l.socket.WriteMessage(websocket.TextMessage, *cmd)
 
-	if err != nil {
+	if err := l.write(websocket.TextMessage, *cmd); err != nil {
 		return nil, err
 	}
 
@@ -541,9 +662,10 @@ func (l *websocketImpl) sendSocketCmd(cmd *[]byte) (*websocketResponse, error) {
 }
 
 func (l *websocketImpl) authenticate() error {
+
 	// Retrieve public key
 	log.Info("Asking for Public Key")
-	publicKey, err := getPublicKeyFromServer(l.host, l.port)
+	publicKey, err := l.getPublicKeyFromServer()
 
 	if err != nil {
 		return err
@@ -570,52 +692,105 @@ func (l *websocketImpl) authenticate() error {
 		return err
 	}
 
-	salt, err := crypto.DecryptAES(resultValue.Value, uniqueID, ivKey)
+	oneTimeSalt, err := crypto.DecryptAES(resultValue.Value, uniqueID, ivKey)
 
 	if err != nil {
 		return err
 	}
 
 	l.encrypt = &encrypt{
-		publicKey:   publicKey,
-		key:         uniqueID,
-		iv:          ivKey,
-		oneTimeSalt: string(salt),
-		timestamp:   time.Now(),
-		salt:        crypto.CreateEncryptKey(2),
+		publicKey: publicKey,
+		key:       uniqueID,
+		iv:        ivKey,
+		timestamp: time.Now(),
+		salt:      crypto.CreateEncryptKey(2),
 	}
 
 	log.Info("Key Exchange OK")
 	log.Info("Authentication Starting")
 
-	err = l.createToken(l.user, l.password, uniqueID)
+	if l.token != nil && l.token.IsValid() {
+		log.Debug("Token still valid, can attempt to re-use")
 
+		// TODO: check token really is valid
+
+		if err := l.reuseToken(string(oneTimeSalt)); err != nil {
+			return err
+		}
+
+		log.Info("Authentication OK with existing token")
+		return nil
+	}
+
+	err = l.createToken(uniqueID)
 	if err != nil {
 		return err
 	}
 
-	log.Info("Authentication OK")
+	log.Info("Authentication OK with new token")
 
 	return nil
 }
 
-func (l *websocketImpl) createToken(user string, password string, uniqueID string) error {
-	cmd := fmt.Sprintf(getUsersalt, user)
+func (l *websocketImpl) reuseToken(oneTimeSalt string) error {
+
+	var alg HashAlg
+	if l.useSHA256 {
+		alg = SHA256
+	} else {
+		alg = SHA1
+	}
+
+	hash := l.encrypt.hashToken(l.token.Token, oneTimeSalt, alg)
+
+	cmd := fmt.Sprintf(authWithToken, hash, l.user)
+
+	token := &token{}
+	_, err := l.sendCmdWithEnc(cmd, requestResponseVal, token)
+	if err != nil {
+		return err
+	}
+
+	// updating token values
+	l.token.TokenRights = token.TokenRights
+	l.token.ValidUntil = token.ValidUntil
+	l.token.UnsecurePass = token.UnsecurePass
+
+	return nil
+}
+
+func (l *websocketImpl) getSalt() (*salt, error) {
+	cmd := fmt.Sprintf(getUsersalt, l.user)
 
 	salt := &salt{}
 	_, err := l.sendCmdWithEnc(cmd, requestResponseVal, salt)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if !salt.HashAlgorithm.Valid() {
-		return fmt.Errorf("unsupported hash algorithm given. For now only '%s' and '%s' are supported", SHA1, SHA256)
+		return nil, fmt.Errorf("unsupported hash algorithm given. For now only '%s' and '%s' are supported", SHA1, SHA256)
 	}
 
-	hash := l.encrypt.hashUser(user, password, salt.Salt, salt.OneTimeSalt, salt.HashAlgorithm)
+	return salt, nil
+}
 
-	cmd = fmt.Sprintf(getToken, hash, user, 4, uniqueID, "GO")
+func (l *websocketImpl) createToken(uniqueID string) error {
+
+	salt, err := l.getSalt()
+	if err != nil {
+		return err
+	}
+
+	hash := l.encrypt.hashUser(l.user, l.password, salt.Salt, salt.OneTimeSalt, salt.HashAlgorithm)
+
+	var cmd string
+	if l.useJwt {
+		cmd = fmt.Sprintf(getJwt, hash, l.user, 4, uniqueID, "GO")
+	} else {
+		cmd = fmt.Sprintf(getToken, hash, l.user, 4, uniqueID, "GO")
+	}
 
 	token := &token{}
 	_, err = l.sendCmdWithEnc(cmd, requestResponseVal, token)
@@ -646,7 +821,7 @@ func (l *websocketImpl) connectWs() error {
 func (l *websocketImpl) readPump() {
 	defer func() {
 		log.Info("Stopping websocket pump")
-		defer l.socket.Close()
+		_ = l.socket.Close()
 	}()
 	log.Info("Starting websocket pump")
 
@@ -742,9 +917,9 @@ func (l *websocketImpl) handleMessages() {
 }
 
 func (l *websocketImpl) handleBinaryEvent(binaryEvent []byte, eventType events.EventType) {
-	events := events.InitBinaryEvent(binaryEvent, eventType)
+	e := events.InitBinaryEvent(binaryEvent, eventType)
 
-	for _, event := range events.Events {
+	for _, event := range e.Events {
 		l.Events <- event
 	}
 }
@@ -758,14 +933,26 @@ func (e *encrypt) hashUser(user string, password string, salt string, oneTimeSal
 	switch hashAlg {
 	case SHA1:
 		hash = strings.ToUpper(crypto.Sha1Hash(passwordSalt))
-		break
+		return crypto.ComputeHmac1(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
 	case SHA256:
 		hash = strings.ToUpper(crypto.Sha256Hash(passwordSalt))
-		break
+		return crypto.ComputeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
 	}
 
 	// hash with user and otSalt
-	return crypto.ComputeHmac256(fmt.Sprintf("%s:%s", user, hash), oneTimeSalt)
+	return ""
+}
+
+func (e *encrypt) hashToken(token string, oneTimeSalt string, alg HashAlg) string {
+
+	switch alg {
+	case SHA1:
+		return crypto.ComputeHmac1(token, oneTimeSalt)
+	case SHA256:
+		return crypto.ComputeHmac256(token, oneTimeSalt)
+	}
+
+	return ""
 }
 
 func (e *encrypt) getEncryptedCmd(cmd string, encryptType encryptType) ([]byte, error) {
@@ -794,9 +981,76 @@ func (e *encrypt) decryptCmd(cipherText []byte) ([]byte, error) {
 	return crypto.DecryptAES(string(cipherText), e.key, e.iv)
 }
 
-func getPublicKeyFromServer(url string, port int) (*rsa.PublicKey, error) {
+type apiKeyResponse struct {
+	Snr         string
+	Version     string
+	Key         string
+	HttpsStatus int32
+}
+
+func (l *websocketImpl) getMiniserverCapabilities() error {
+
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", url, port, getPublicKey), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", l.host, l.port, getApikey), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != 200 {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		return err
+	}
+
+	apiKeyValue := &SimpleValue{}
+	_, err = deserializeLoxoneResponse(body, apiKeyValue)
+
+	if err != nil {
+		return err
+	}
+
+	if apiKeyValue.Value == "" {
+		return errors.New("api key response from Miniserver is empty")
+	}
+
+	apiKeyValue.Value = strings.ReplaceAll(apiKeyValue.Value, "'", "\"")
+
+	apiKey := &apiKeyResponse{}
+	err = json.Unmarshal([]byte(apiKeyValue.Value), apiKey)
+
+	if err != nil {
+		return err
+	}
+
+	// Making an assumption based on the fact that if anything errors it will most likely be the absolute
+	// latest version and support the latest features as this has been tested with older firmwares
+
+	if miniserverVersion, err := version.NewVersion(apiKey.Version); err == nil {
+		if jwtVersion, err := version.NewVersion("10.1.12.5"); err == nil && miniserverVersion.LessThan(jwtVersion) {
+			l.useJwt = false
+		}
+		if sha256Version, err := version.NewVersion("10.4.0.0"); err == nil && miniserverVersion.LessThan(sha256Version) {
+			l.useSHA256 = false
+		}
+	}
+
+	return nil
+}
+
+func (l *websocketImpl) getPublicKeyFromServer() (*rsa.PublicKey, error) {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", l.host, l.port, getPublicKey), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -875,7 +1129,6 @@ func deserializeLoxoneResponse(jsonBytes []byte, class interface{}) (body *Body,
 		rv.FieldByName("Value").SetString(ll["value"].(string))
 	case map[string]interface{}:
 		err = mapstructure.Decode(ll["value"], &class)
-
 		if err != nil {
 			return
 		}

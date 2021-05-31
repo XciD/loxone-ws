@@ -53,6 +53,16 @@ func BytesToPublicKey(pub string) (*rsa.PublicKey, error) {
 
 func ComputeHmac256(message string, secret string) string {
 	key, _ := hex.DecodeString(secret)
+	h := hmac.New(sha256.New, key)
+	_, err := h.Write([]byte(message))
+	if err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func ComputeHmac1(message string, secret string) string {
+	key, _ := hex.DecodeString(secret)
 	h := hmac.New(sha1.New, key)
 	_, err := h.Write([]byte(message))
 	if err != nil {
@@ -113,7 +123,7 @@ func unpad(data []byte, blockSize int) (output []byte, err error) {
 		paddingBytes++
 	}
 	if paddingBytes > blockSize || paddingBytes <= 0 {
-		return output, nil
+		return data, nil
 	}
 	output = data[0 : dataLen-paddingBytes]
 	return output, nil
