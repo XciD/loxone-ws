@@ -31,8 +31,8 @@ const (
 	keyExchange                  = "jdev/sys/keyexchange/%s"
 	getUsersalt                  = "jdev/sys/getkey2/%s"
 	getToken                     = "jdev/sys/gettoken/%s/%s/%d/%s/%s" // #nosec
-	getJwt                       = "jdev/sys/getjwt/%s/%s/%d/%s/%s"
-	authWithToken                = "authwithtoken/%s/%s"
+	getJwt                       = "jdev/sys/getjwt/%s/%s/%d/%s/%s"   // #nosec
+	authWithToken                = "authwithtoken/%s/%s"              // #nosec
 	aesPayload                   = "salt/%s/%s"
 	encryptionCmd                = "jdev/sys/enc/%s"
 	encryptionCommandAndResponse = "jdev/sys/fenc/%s"
@@ -301,8 +301,10 @@ const (
 	requestResponseVal encryptType = 2
 )
 
+// WebsocketOption is a type we use to customise our websocket, it enables dynamic configuration in an easy to use API
 type WebsocketOption func(*websocketImpl) error
 
+// WithAutoReconnect allows you to disable auto reconnect behaviour by passing this option with 'false'
 func WithAutoReconnect(autoReconnect bool) WebsocketOption {
 	return func(ws *websocketImpl) error {
 		ws.autoReconnect = autoReconnect
@@ -310,6 +312,7 @@ func WithAutoReconnect(autoReconnect bool) WebsocketOption {
 	}
 }
 
+// WithReconnectTimeout sets the time between disconnection and reconnect attempts
 func WithReconnectTimeout(timeout time.Duration) WebsocketOption {
 	return func(ws *websocketImpl) error {
 		ws.reconnectTimeout = timeout
@@ -317,6 +320,7 @@ func WithReconnectTimeout(timeout time.Duration) WebsocketOption {
 	}
 }
 
+// WithRegisterEvents automatically registers for events upon connecting to the Miniserver
 func WithRegisterEvents() WebsocketOption {
 	return func(ws *websocketImpl) error {
 		ws.registerEvents = true
@@ -324,6 +328,7 @@ func WithRegisterEvents() WebsocketOption {
 	}
 }
 
+// WithPort set a custom port for the Miniserver
 func WithPort(port int) WebsocketOption {
 	return func(ws *websocketImpl) error {
 		ws.port = port
@@ -331,6 +336,8 @@ func WithPort(port int) WebsocketOption {
 	}
 }
 
+// WithUsernameAndPassword sets the username and password authentication, also used when supplied with a JWT
+// to generate a new token if the provided token expires before being refreshed
 func WithUsernameAndPassword(username string, password string) WebsocketOption {
 	return func(ws *websocketImpl) error {
 		if ws.user != "" && ws.user != username {
@@ -342,6 +349,8 @@ func WithUsernameAndPassword(username string, password string) WebsocketOption {
 	}
 }
 
+// WithJWTToken pre-sets the authentication token, at the moment there is no automatic refresh mechanism so it
+// is safer to use alongside username and password authentication
 func WithJWTToken(tokenString string) WebsocketOption {
 	return func(ws *websocketImpl) error {
 
@@ -722,7 +731,7 @@ func (l *websocketImpl) authenticate() error {
 		return nil
 	}
 
-	err = l.createToken(uniqueID)
+	err = l.createToken()
 	if err != nil {
 		return err
 	}
@@ -733,6 +742,15 @@ func (l *websocketImpl) authenticate() error {
 }
 
 func (l *websocketImpl) reuseToken(oneTimeSalt string) error {
+
+	if oneTimeSalt == "" {
+		key := &SimpleValue{}
+		_, err := l.sendCmdWithEnc("jdev/sys/getkey", requestResponseVal, key)
+		if err != nil {
+			return err
+		}
+		oneTimeSalt = key.Value
+	}
 
 	var alg HashAlg
 	if l.useSHA256 {
@@ -776,7 +794,7 @@ func (l *websocketImpl) getSalt() (*salt, error) {
 	return salt, nil
 }
 
-func (l *websocketImpl) createToken(uniqueID string) error {
+func (l *websocketImpl) createToken() error {
 
 	salt, err := l.getSalt()
 	if err != nil {
@@ -787,9 +805,9 @@ func (l *websocketImpl) createToken(uniqueID string) error {
 
 	var cmd string
 	if l.useJwt {
-		cmd = fmt.Sprintf(getJwt, hash, l.user, 4, uniqueID, "GO")
+		cmd = fmt.Sprintf(getJwt, hash, l.user, 4, l.encrypt.key, "GO")
 	} else {
-		cmd = fmt.Sprintf(getToken, hash, l.user, 4, uniqueID, "GO")
+		cmd = fmt.Sprintf(getToken, hash, l.user, 4, l.encrypt.key, "GO")
 	}
 
 	token := &token{}

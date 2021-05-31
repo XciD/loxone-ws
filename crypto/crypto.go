@@ -19,7 +19,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// bytesToPublicKey bytes to public key
+// BytesToPublicKey convert Miniserver formatted PEM to rsa public key object
 func BytesToPublicKey(pub string) (*rsa.PublicKey, error) {
 	pub = strings.Replace(pub, "-----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE-----\n", 1)
 	pub = strings.Replace(pub, "-----END CERTIFICATE-----", "\n-----END CERTIFICATE-----", 1)
