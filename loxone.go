@@ -206,6 +206,8 @@ type websocketImpl struct {
 	autoReconnect     bool
 	reconnectTimeout  time.Duration
 	socketMu          sync.Mutex
+	keepaliveInterval time.Duration
+	connectionTimeout time.Duration
 
 	// Miniserver capabilities
 	httpsSupported bool // in jdev/cfg/apiKey response (httpsStatus: 1 Supported, 2 Supported but expired)
@@ -232,6 +234,7 @@ SHA_256: "10.4.0.0"
 
 type Loxone interface {
 	GetEvents() <-chan events.Event
+	Done() <-chan bool
 	AddHook(uuid string, callback func(events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
 	SendEncryptedCommand(command string, class interface{}) (*Body, error)
@@ -308,6 +311,26 @@ type WebsocketOption func(*websocketImpl) error
 func WithAutoReconnect(autoReconnect bool) WebsocketOption {
 	return func(ws *websocketImpl) error {
 		ws.autoReconnect = autoReconnect
+		return nil
+	}
+}
+
+// WithKeepAliveInterval allows you to set the interval where keepalive messages are sent,
+// a duration of 0 disables keepalive. If not specified it will default to 2 seconds as per Loxone's own LxCommunicator.
+func WithKeepAliveInterval(keepAliveInterval time.Duration) WebsocketOption {
+	return func(ws *websocketImpl) error {
+		ws.keepaliveInterval = keepAliveInterval
+		return nil
+	}
+}
+
+// WithConnectionTimeout allows you to set the connection timeout, the connection will close if nothing is
+// received for this amount of time.
+// If keepalive is enabled this will default to 3 * keepaliveTimeout, otherwise the connection will not timeout
+// unless this option is specified. If keepalive is enabled this value must be higher than keepaliveInterval.
+func WithConnectionTimeout(connectionTimeout time.Duration) WebsocketOption {
+	return func(ws *websocketImpl) error {
+		ws.connectionTimeout = connectionTimeout
 		return nil
 	}
 }
@@ -418,6 +441,7 @@ func New(host string, opts ...WebsocketOption) (Loxone, error) {
 		reconnectTimeout:  30 * time.Second,
 		useJwt:            true,
 		useSHA256:         true,
+		keepaliveInterval: 2 * time.Second, // seems like a small number but Loxone's own LxCommunicator uses this value
 	}
 
 	// Loop through each option
@@ -426,6 +450,14 @@ func New(host string, opts ...WebsocketOption) (Loxone, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if loxone.keepaliveInterval > 0 && loxone.connectionTimeout == 0 {
+		loxone.connectionTimeout = 3 * loxone.keepaliveInterval
+	}
+
+	if loxone.connectionTimeout < loxone.keepaliveInterval {
+		return nil, errors.New("you cannot have a connection timeout less than the keepalive interval")
 	}
 
 	if loxone.token == nil && (loxone.user == "" || loxone.password == "") {
@@ -478,8 +510,14 @@ func (l *websocketImpl) connect() error {
 
 func (l *websocketImpl) handleReconnect() {
 	// If we finish, we restart a reconnect loop
+
+	// init a timer we may not need, but need the channel to be valid
+	keepAliveTimer := time.NewTimer(0)
+	<-keepAliveTimer.C
+
 	defer func() {
 		atomic.AddInt32(&l.reconnectHandlers, -1)
+		keepAliveTimer.Stop()
 		log.Info("Stopping disconnect loop")
 	}()
 
@@ -487,11 +525,15 @@ func (l *websocketImpl) handleReconnect() {
 	log.Info("Starting disconnect loop")
 
 	for {
+
+		if l.keepaliveInterval > 0 {
+			keepAliveTimer.Reset(l.keepaliveInterval)
+		}
+
 		select {
 		case <-l.stop:
 			return
 		case <-l.disconnected:
-
 			if !l.autoReconnect {
 				close(l.stop)
 				return
@@ -511,6 +553,9 @@ func (l *websocketImpl) handleReconnect() {
 				break
 			}
 			return
+		case <-keepAliveTimer.C:
+			log.Debug("Sending keepalive")
+			_ = l.write(websocket.TextMessage, []byte("keepalive"))
 		}
 	}
 
@@ -552,6 +597,10 @@ func (l *websocketImpl) AddHook(uuid string, callback func(events.Event)) {
 // GetEvents returns the events in a receive only channel
 func (l *websocketImpl) GetEvents() <-chan events.Event {
 	return l.Events
+}
+
+func (l *websocketImpl) Done() <-chan bool {
+	return l.stop
 }
 
 // PumpEvents starts processing events to trigger registered hooks
@@ -844,6 +893,9 @@ func (l *websocketImpl) readPump() {
 	log.Info("Starting websocket pump")
 
 	for {
+		if l.connectionTimeout > 0 {
+			_ = l.socket.SetReadDeadline(time.Now().Add(l.connectionTimeout))
+		}
 		_, message, err := l.socket.ReadMessage()
 		if err != nil {
 			// ensure there is a reconnect handler running to prevent hang
@@ -1009,6 +1061,7 @@ type apiKeyResponse struct {
 func (l *websocketImpl) getMiniserverCapabilities() error {
 
 	client := &http.Client{}
+	client.Timeout = 5 * time.Second
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", l.host, l.port, getApikey), nil)
 	if err != nil {
 		return err
@@ -1068,6 +1121,8 @@ func (l *websocketImpl) getMiniserverCapabilities() error {
 
 func (l *websocketImpl) getPublicKeyFromServer() (*rsa.PublicKey, error) {
 	client := &http.Client{}
+	client.Timeout = 5 * time.Second
+
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", l.host, l.port, getPublicKey), nil)
 	if err != nil {
 		return nil, err
