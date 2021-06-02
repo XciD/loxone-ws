@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/XciD/loxone-ws/crypto"
@@ -202,7 +201,6 @@ type websocketImpl struct {
 	stop              chan bool
 	hooks             map[string]func(events.Event)
 	registerEvents    bool
-	reconnectHandlers int32
 	autoReconnect     bool
 	reconnectTimeout  time.Duration
 	socketMu          sync.Mutex
@@ -232,13 +230,18 @@ JWT_SUPPORT: "10.1.12.5",                   // From this version onwards, JWTs a
 SHA_256: "10.4.0.0"
 */
 
+type LoxoneDownloadSocket interface {
+	Close()
+	GetFile(filename string) ([]byte, error)
+}
+
 type Loxone interface {
 	GetEvents() <-chan events.Event
 	Done() <-chan bool
 	AddHook(uuid string, callback func(events.Event))
 	SendCommand(command string, class interface{}) (*Body, error)
 	SendEncryptedCommand(command string, class interface{}) (*Body, error)
-	GetFile(filename string) ([]byte, error)
+	GetDownloadSocket() (LoxoneDownloadSocket, error)
 	Close()
 	RegisterEvents() error
 	PumpEvents(stop <-chan bool)
@@ -436,7 +439,6 @@ func New(host string, opts ...WebsocketOption) (Loxone, error) {
 		stop:              make(chan bool),
 		hooks:             make(map[string]func(events.Event)),
 		socketMessage:     make(chan []byte),
-		reconnectHandlers: 0,
 		autoReconnect:     true,
 		reconnectTimeout:  30 * time.Second,
 		useJwt:            true,
@@ -473,6 +475,34 @@ func New(host string, opts ...WebsocketOption) (Loxone, error) {
 	}
 
 	return loxone, nil
+}
+
+func (l *websocketImpl) GetDownloadSocket() (LoxoneDownloadSocket, error) {
+	// clone current socket but with no keepalive or timeout
+	downloadSocket := &websocketImpl{
+		Events:          make(chan events.Event),
+		host:            l.host,
+		port:            l.port,
+		callbackChannel: make(chan *websocketResponse),
+		disconnected:    make(chan bool),
+		stop:            make(chan bool),
+		socketMessage:   make(chan []byte),
+		useJwt:          true,
+		useSHA256:       true,
+		user:            l.user,
+		password:        l.password,
+		token:           l.token,
+	}
+
+	go downloadSocket.handleMessages()
+
+	err := downloadSocket.connect()
+
+	if err != nil {
+		return nil, err
+	}
+
+	return downloadSocket, nil
 }
 
 func (l *websocketImpl) connect() error {
@@ -516,12 +546,10 @@ func (l *websocketImpl) handleReconnect() {
 	<-keepAliveTimer.C
 
 	defer func() {
-		atomic.AddInt32(&l.reconnectHandlers, -1)
 		keepAliveTimer.Stop()
 		log.Info("Stopping disconnect loop")
 	}()
 
-	atomic.AddInt32(&l.reconnectHandlers, 1)
 	log.Info("Starting disconnect loop")
 
 	for {
@@ -534,6 +562,8 @@ func (l *websocketImpl) handleReconnect() {
 		case <-l.stop:
 			return
 		case <-l.disconnected:
+
+			// if auto reconnect is disabled, close the stop channel and return immediately
 			if !l.autoReconnect {
 				close(l.stop)
 				return
@@ -541,20 +571,24 @@ func (l *websocketImpl) handleReconnect() {
 
 			for {
 				log.Warnf("Disconnected, reconnecting in %s", l.reconnectTimeout)
-				time.Sleep(l.reconnectTimeout)
 
-				err := l.connect()
+				// check for stop during reconnect loop
+				select {
+				case <-l.stop:
+					return
+				case <-time.After(l.reconnectTimeout):
+					err := l.connect()
 
-				if err != nil {
-					log.Warnf("Error during reconnection, retrying (%s)", err.Error())
-					continue
+					if err != nil {
+						log.Warnf("Error during reconnection, retrying (%s)", err.Error())
+						continue
+					}
+
+					return
 				}
-
-				break
 			}
-			return
 		case <-keepAliveTimer.C:
-			log.Debug("Sending keepalive")
+			log.Trace("Sending keepalive")
 			_ = l.write(websocket.TextMessage, []byte("keepalive"))
 		}
 	}
@@ -893,18 +927,34 @@ func (l *websocketImpl) readPump() {
 	log.Info("Starting websocket pump")
 
 	for {
+
+		// double check to make sure the socket hasn't got stuck
+		// had some (rare) examples where closing socket didn't break this loop
+		select {
+		case <-l.stop:
+			return
+		default:
+		}
+
 		if l.connectionTimeout > 0 {
 			_ = l.socket.SetReadDeadline(time.Now().Add(l.connectionTimeout))
 		}
 		_, message, err := l.socket.ReadMessage()
+
 		if err != nil {
-			// ensure there is a reconnect handler running to prevent hang
-			if handlers := atomic.LoadInt32(&l.reconnectHandlers); handlers > 0 {
-				l.disconnected <- true
-			}
+
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
+
+			// if Close called we don't want to send to a potentially blocked channel
+			select {
+			case <-l.stop:
+				return
+			default:
+			}
+			l.disconnected <- true
+
 			break
 		}
 
