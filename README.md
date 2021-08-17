@@ -7,6 +7,6 @@
 
 
 TODO
-  - Loxone DNS
-  - Download Socket
-  - Version Check
+  - ~~Loxone DNS~~
+  - ~~Download Socket~~
+  - ~~Version Check~~
