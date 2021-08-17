@@ -180,7 +180,7 @@ func CreateConfig() *Config {
 func ExampleNew() {
 	// create a new connection to 1.2.3.4 using the default port 80 with the username 'admin' and password 'admin'
 	// auto reconnect will be enabled with a timeout of 30 seconds
-	lox, err := New("1.2.3.4", WithUsernameAndPassword("admin", "admin"))
+	lox, err := New(WithHost("1.2.3.4"), WithUsernameAndPassword("admin", "admin"))
 	if err != nil {
 		panic(err)
 	}
@@ -200,7 +200,27 @@ func ExampleNew() {
 func ExampleNew_complex() {
 	// create a new connection to 1.2.3.4 using a custom port 7777 with the username 'admin' and password 'admin',
 	// automatically register for events when connected and adjust the reconnect timeout to 15 seconds.
-	lox, err := New("1.2.3.4", WithPort(7777), WithUsernameAndPassword("admin", "admin"), WithRegisterEvents(), WithReconnectTimeout(15*time.Second))
+	lox, err := New(WithHost("1.2.3.4"), WithPort(7777), WithUsernameAndPassword("admin", "admin"), WithRegisterEvents(), WithReconnectTimeout(15*time.Second))
+	if err != nil {
+		panic(err)
+	}
+
+	// loop the events channel
+	for event := range lox.GetEvents() {
+		log.Infof("%s: %.2f", event.UUID, event.Value)
+	}
+}
+
+func ExampleNew_cloudDNS() {
+	// gets the connection details from Loxone Cloud DNS for the specified Miniserver MAC and connects with the
+	// username 'admin' and password 'admin' auto reconnect will be enabled with a timeout of 30 seconds
+	lox, err := New(WithCloudDNS("504f94a00000"), WithUsernameAndPassword("admin", "admin"))
+	if err != nil {
+		panic(err)
+	}
+
+	// register for events so we get sent updates for values
+	err = lox.RegisterEvents()
 	if err != nil {
 		panic(err)
 	}

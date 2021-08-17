@@ -2,6 +2,7 @@ package loxone
 
 import (
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ const (
 	getJwt                       = "jdev/sys/getjwt/%s/%s/%d/%s/%s"   // #nosec
 	authWithToken                = "authwithtoken/%s/%s"              // #nosec
 	aesPayload                   = "salt/%s/%s"
+	aesPayloadNextSalt           = "nextSalt/%s/%s/%s"
 	encryptionCmd                = "jdev/sys/enc/%s"
 	encryptionCommandAndResponse = "jdev/sys/fenc/%s"
 	registerEvents               = "jdev/sps/enablebinstatusupdate"
@@ -187,30 +189,34 @@ type Category struct {
 
 // Loxone The loxone object exposed
 type websocketImpl struct {
-	host              string
-	port              int
-	user              string
-	password          string
-	encrypt           *encrypt
-	token             *token
-	Events            chan events.Event
-	callbackChannel   chan *websocketResponse
-	socketMessage     chan []byte
-	socket            *websocket.Conn
-	disconnected      chan bool
-	stop              chan bool
-	hooks             map[string]func(events.Event)
-	registerEvents    bool
-	autoReconnect     bool
-	reconnectTimeout  time.Duration
-	socketMu          sync.Mutex
-	keepaliveInterval time.Duration
-	connectionTimeout time.Duration
+	host               string
+	port               uint16
+	user               string
+	password           string
+	encrypt            *encrypt
+	token              *token
+	Events             chan events.Event
+	callbackChannel    chan *websocketResponse
+	socketMessage      chan []byte
+	socket             *websocket.Conn
+	disconnected       chan bool
+	stop               chan bool
+	hooks              map[string]func(events.Event)
+	registerEvents     bool
+	autoReconnect      bool
+	reconnectTimeout   time.Duration
+	socketMu           sync.Mutex
+	keepaliveInterval  time.Duration
+	connectionTimeout  time.Duration
+	miniserverMac      string
+	useTLS             bool
+	insecureSkipVerify bool
+	httpTransport      *http.Transport
 
 	// Miniserver capabilities
-	httpsSupported bool // in jdev/cfg/apiKey response (httpsStatus: 1 Supported, 2 Supported but expired)
-	useJwt         bool // 10.1.12.5
-	useSHA256      bool // 10.4.0.0
+	httpsSupported uint8 // in jdev/cfg/apiKey response (httpsStatus: 1 Supported, 2 Supported but expired)
+	useJwt         bool  // 10.1.12.5
+	useSHA256      bool  // 10.4.0.0
 
 }
 
@@ -354,8 +360,47 @@ func WithRegisterEvents() WebsocketOption {
 	}
 }
 
+// WithURL allows initialising with a URL including schema, host and port e.g. http(s)://1.2.3.4:7494 or ws(s)://1.2.3.4:7494
+func WithURL(urlString string) WebsocketOption {
+	return func(ws *websocketImpl) error {
+		u, err := url.Parse(urlString)
+		if err != nil {
+			return err
+		}
+
+		ws.updateFromURL(u)
+
+		return nil
+	}
+}
+
+// WithoutSSLVerification skips certificate verification to allow self-signed certificates or connections directly to an IP address
+func WithoutSSLVerification() WebsocketOption {
+	return func(ws *websocketImpl) error {
+		ws.insecureSkipVerify = true
+		ws.httpTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		return nil
+	}
+}
+
+// WithHost connects using a given host name or ip address
+func WithHost(host string) WebsocketOption {
+	return func(ws *websocketImpl) error {
+		ws.host = host
+		return nil
+	}
+}
+
+// WithCloudDNS will initiate the websocket to resolve the protocol, hostname and port from Loxone's Cloud DNS
+func WithCloudDNS(miniserverMac string) WebsocketOption {
+	return func(ws *websocketImpl) error {
+		ws.miniserverMac = strings.ToLower(strings.ReplaceAll(miniserverMac, ":", ""))
+		return nil
+	}
+}
+
 // WithPort set a custom port for the Miniserver
-func WithPort(port int) WebsocketOption {
+func WithPort(port uint16) WebsocketOption {
 	return func(ws *websocketImpl) error {
 		ws.port = port
 		return nil
@@ -421,30 +466,28 @@ func WithJWTToken(tokenString string) WebsocketOption {
 	}
 }
 
+func newBase() *websocketImpl {
+	return &websocketImpl{
+		port:            80,
+		Events:          make(chan events.Event),
+		callbackChannel: make(chan *websocketResponse),
+		disconnected:    make(chan bool),
+		stop:            make(chan bool),
+		hooks:           make(map[string]func(events.Event)),
+		socketMessage:   make(chan []byte),
+		useJwt:          true,
+		useSHA256:       true,
+		httpTransport:   http.DefaultTransport.(*http.Transport).Clone(),
+	}
+}
+
 // New creates a websocket and connects to the Miniserver
-func New(host string, opts ...WebsocketOption) (Loxone, error) {
+func New(opts ...WebsocketOption) (Loxone, error) {
 
-	// Check if all mandatory parameters were given
-	if host == "" {
-		return nil, errors.New("missing host")
-	}
-
-	loxone := &websocketImpl{
-		Events:            make(chan events.Event),
-		host:              host,
-		port:              80,
-		registerEvents:    false,
-		callbackChannel:   make(chan *websocketResponse),
-		disconnected:      make(chan bool),
-		stop:              make(chan bool),
-		hooks:             make(map[string]func(events.Event)),
-		socketMessage:     make(chan []byte),
-		autoReconnect:     true,
-		reconnectTimeout:  30 * time.Second,
-		useJwt:            true,
-		useSHA256:         true,
-		keepaliveInterval: 2 * time.Second, // seems like a small number but Loxone's own LxCommunicator uses this value
-	}
+	loxone := newBase()
+	loxone.autoReconnect = true
+	loxone.reconnectTimeout = 30 * time.Second
+	loxone.keepaliveInterval = 2 * time.Second
 
 	// Loop through each option
 	for _, opt := range opts {
@@ -466,6 +509,10 @@ func New(host string, opts ...WebsocketOption) (Loxone, error) {
 		return nil, errors.New("you must specify at least one of WithUsernameAndPassword() or WithJWTToken() options")
 	}
 
+	if loxone.host == "" && loxone.miniserverMac == "" {
+		return nil, errors.New("you must specify at least one of WithURL(), WithHost() or WithCloudDNS()")
+	}
+
 	go loxone.handleMessages()
 
 	err := loxone.connect()
@@ -477,22 +524,17 @@ func New(host string, opts ...WebsocketOption) (Loxone, error) {
 	return loxone, nil
 }
 
+// GetDownloadSocket clones the existing socket but without keepalive or timeout specifically to perform file downloads
 func (l *websocketImpl) GetDownloadSocket() (LoxoneDownloadSocket, error) {
 	// clone current socket but with no keepalive or timeout
-	downloadSocket := &websocketImpl{
-		Events:          make(chan events.Event),
-		host:            l.host,
-		port:            l.port,
-		callbackChannel: make(chan *websocketResponse),
-		disconnected:    make(chan bool),
-		stop:            make(chan bool),
-		socketMessage:   make(chan []byte),
-		useJwt:          true,
-		useSHA256:       true,
-		user:            l.user,
-		password:        l.password,
-		token:           l.token,
-	}
+
+	downloadSocket := newBase()
+	downloadSocket.host = l.host
+	downloadSocket.port = l.port
+	downloadSocket.useTLS = l.useTLS
+	downloadSocket.user = l.user
+	downloadSocket.password = l.password
+	downloadSocket.token = l.token
 
 	go downloadSocket.handleMessages()
 
@@ -505,7 +547,109 @@ func (l *websocketImpl) GetDownloadSocket() (LoxoneDownloadSocket, error) {
 	return downloadSocket, nil
 }
 
+type cloudDnsResponse struct {
+	CMD           string `json:"cmd"`
+	Code          uint16
+	IP            string
+	PortOpen      bool
+	DNSStatus     string `json:"DNS-Status"`
+	Datacenter    string
+	IPHTTPS       string
+	PortOpenHTTPS bool
+}
+
+// Url provides the url connection string based on a Cloud DNS response
+func (cdr *cloudDnsResponse) Url(miniserverMac string) *url.URL {
+
+	var hostComponents []string
+	scheme := "ws"
+	if cdr.PortOpenHTTPS {
+		hostComponents = strings.Split(cdr.IPHTTPS, ":")
+		scheme = "wss"
+	} else if cdr.PortOpen {
+		hostComponents = strings.Split(cdr.IP, ":")
+	} else {
+		return nil
+	}
+
+	if cdr.Datacenter == "" {
+		cdr.Datacenter = "loxonecloud.com"
+	}
+
+	ipHost := strings.ReplaceAll(hostComponents[0], ".", "-")
+	return &url.URL{Scheme: scheme, Host: fmt.Sprintf("%s.%s.dyndns.%s:%s", ipHost, miniserverMac, cdr.Datacenter, hostComponents[1])}
+}
+
+func (l *websocketImpl) updateFromURL(u *url.URL) {
+	if u.Scheme == "wss" || u.Scheme == "https" {
+		l.useTLS = true
+	}
+
+	port, err := strconv.ParseUint(u.Port(), 10, 16)
+	if err != nil {
+		if l.useTLS {
+			port = 443
+		} else {
+			port = 80
+		}
+	}
+
+	l.host = u.Hostname()
+	l.port = uint16(port)
+}
+
+func (l *websocketImpl) resolveLoxoneDNS() error {
+
+	log.Info("Resolving connection details via Loxone Cloud DNS")
+
+	client := &http.Client{}
+	client.Timeout = 5 * time.Second
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://dns.loxonecloud.com/?getip&snr=%s&json=true", l.miniserverMac), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("loxone cloud dns request failed with code '%d'", resp.StatusCode)
+	}
+
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		return err
+	}
+
+	response := &cloudDnsResponse{}
+	err = json.Unmarshal(body, response)
+	if err != nil {
+		return err
+	}
+
+	u := response.Url(l.miniserverMac)
+
+	l.updateFromURL(u)
+
+	log.Infof("Resolved URL to be: %s", u.String())
+
+	return nil
+}
+
 func (l *websocketImpl) connect() error {
+
+	if l.host == "" && l.miniserverMac != "" {
+		err := l.resolveLoxoneDNS()
+		if err != nil {
+			return err
+		}
+	}
 
 	// this is recommended to be done first by docs, gives MS version and HTTPS status
 	log.Info("Asking for API Key, Version, and HTTPS Status ")
@@ -633,6 +777,7 @@ func (l *websocketImpl) GetEvents() <-chan events.Event {
 	return l.Events
 }
 
+// Done returns the stop channel to indicate the socket has been called to close
 func (l *websocketImpl) Done() <-chan bool {
 	return l.stop
 }
@@ -668,8 +813,8 @@ func (l *websocketImpl) GetConfig() (*Config, error) {
 	return config, nil
 }
 
+// GetFile downloads a file with the specified filename
 func (l *websocketImpl) GetFile(filename string) ([]byte, error) {
-	// TODO open up a second socket for this to not block events
 	bytes := []byte(filename)
 	res, err := l.sendSocketCmd(&bytes)
 	if err != nil {
@@ -860,7 +1005,7 @@ func (l *websocketImpl) reuseToken(oneTimeSalt string) error {
 	return nil
 }
 
-func (l *websocketImpl) getSalt() (*salt, error) {
+func (l *websocketImpl) getOneTimeSalt() (*salt, error) {
 	cmd := fmt.Sprintf(getUsersalt, l.user)
 
 	salt := &salt{}
@@ -879,7 +1024,7 @@ func (l *websocketImpl) getSalt() (*salt, error) {
 
 func (l *websocketImpl) createToken() error {
 
-	salt, err := l.getSalt()
+	salt, err := l.getOneTimeSalt()
 	if err != nil {
 		return err
 	}
@@ -906,9 +1051,19 @@ func (l *websocketImpl) createToken() error {
 
 func (l *websocketImpl) connectWs() error {
 	log.Info("Connecting to WS")
-	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", l.host, l.port), Path: "/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10)}
 
-	socket, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	u := l.getWsUrl("/ws/rfc6455?_=" + strconv.FormatInt(time.Now().Unix(), 10))
+
+	dialer := &websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 45 * time.Second,
+	}
+
+	if l.insecureSkipVerify {
+		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+
+	socket, _, err := dialer.Dial(u.String(), nil)
 	l.socket = socket
 	if err != nil {
 		return err
@@ -990,7 +1145,7 @@ func (l *websocketImpl) handleMessages() {
 					// TODO sendOnBinaryMessage
 					incomingData = events.EmptyHeader
 				} else {
-					log.Debugf("Received header: %+v\n", incomingData)
+					log.Tracef("Received header: %+v\n", incomingData)
 
 					if incomingData.EventType == events.EventTypeOutofservice {
 						log.Warn("Miniserver out of service!")
@@ -998,7 +1153,7 @@ func (l *websocketImpl) handleMessages() {
 					}
 
 					if incomingData.EventType == events.EventTypeKeepalive {
-						log.Debug("KeepAlive")
+						log.Trace("KeepAlive")
 						incomingData = events.EmptyHeader
 						continue
 					}
@@ -1080,6 +1235,9 @@ func (e *encrypt) getEncryptedCmd(cmd string, encryptType encryptType) ([]byte, 
 		return []byte(cmd), nil
 	}
 
+	// at what point can we be certain the Miniserver is expecting the new salt
+	// do we need a valid command? any command even if it errors?
+
 	// TODO code next Salt
 	cmd = fmt.Sprintf(aesPayload, e.salt, cmd)
 	cipher, err := crypto.EncryptAES(cmd, e.key, e.iv)
@@ -1105,14 +1263,17 @@ type apiKeyResponse struct {
 	Snr         string
 	Version     string
 	Key         string
-	HttpsStatus int32
+	HttpsStatus uint8
 }
 
 func (l *websocketImpl) getMiniserverCapabilities() error {
 
-	client := &http.Client{}
+	client := &http.Client{Transport: l.httpTransport}
 	client.Timeout = 5 * time.Second
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", l.host, l.port, getApikey), nil)
+
+	u := l.getHttpUrl(getApikey)
+
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return err
 	}
@@ -1154,6 +1315,8 @@ func (l *websocketImpl) getMiniserverCapabilities() error {
 		return err
 	}
 
+	l.httpsSupported = apiKey.HttpsStatus
+
 	// Making an assumption based on the fact that if anything errors it will most likely be the absolute
 	// latest version and support the latest features as this has been tested with older firmwares
 
@@ -1169,11 +1332,33 @@ func (l *websocketImpl) getMiniserverCapabilities() error {
 	return nil
 }
 
+func (l *websocketImpl) generateUrl(scheme string, path string) url.URL {
+	return url.URL{Scheme: scheme, Host: fmt.Sprintf("%s:%d", l.host, l.port), Path: path}
+}
+
+func (l *websocketImpl) getHttpUrl(path string) url.URL {
+	scheme := "http"
+	if l.useTLS {
+		scheme = "https"
+	}
+	return l.generateUrl(scheme, path)
+}
+
+func (l *websocketImpl) getWsUrl(path string) url.URL {
+	scheme := "ws"
+	if l.useTLS {
+		scheme = "wss"
+	}
+	return l.generateUrl(scheme, path)
+}
+
 func (l *websocketImpl) getPublicKeyFromServer() (*rsa.PublicKey, error) {
-	client := &http.Client{}
+	client := &http.Client{Transport: l.httpTransport}
 	client.Timeout = 5 * time.Second
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/%s", l.host, l.port, getPublicKey), nil)
+	u := l.getHttpUrl(getPublicKey)
+
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
