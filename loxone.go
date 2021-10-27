@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -518,6 +518,7 @@ func New(opts ...WebsocketOption) (Loxone, error) {
 	err := loxone.connect()
 
 	if err != nil {
+		close(loxone.stop) // need to stop any open goroutines
 		return nil, err
 	}
 
@@ -621,7 +622,7 @@ func (l *websocketImpl) resolveLoxoneDNS() error {
 
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 
 	if err != nil {
 		return err
@@ -1077,7 +1078,6 @@ func (l *websocketImpl) connectWs() error {
 func (l *websocketImpl) readPump() {
 	defer func() {
 		log.Info("Stopping websocket pump")
-		_ = l.socket.Close()
 	}()
 	log.Info("Starting websocket pump")
 
@@ -1098,19 +1098,18 @@ func (l *websocketImpl) readPump() {
 
 		if err != nil {
 
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Error("Socket error:", err)
 			}
 
-			// if Close called we don't want to send to a potentially blocked channel
+			// if Close was called, or socket not fully open yet we don't want to send to a blocked channel
 			select {
-			case <-l.stop:
-				return
+			case l.disconnected <- true:
+				log.Trace("Disconnect channel notified socket disconnected")
 			default:
 			}
-			l.disconnected <- true
 
-			break
+			return
 		}
 
 		log.Trace("Pushing new message from socket to socket channel")
@@ -1125,6 +1124,7 @@ func (l *websocketImpl) handleMessages() {
 	defer func() {
 		log.Info("Stopping message handling")
 	}()
+	log.Info("Starting message handling")
 
 	for {
 		select {
@@ -1289,7 +1289,7 @@ func (l *websocketImpl) getMiniserverCapabilities() error {
 
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 
 	if err != nil {
 		return err
@@ -1374,7 +1374,7 @@ func (l *websocketImpl) getPublicKeyFromServer() (*rsa.PublicKey, error) {
 
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 
 	if err != nil {
 		return nil, err
