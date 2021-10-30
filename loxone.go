@@ -559,16 +559,29 @@ type cloudDnsResponse struct {
 	PortOpenHTTPS bool
 }
 
+func getPortString(hostComponents []string, https bool) string {
+	if len(hostComponents) > 1 {
+		return hostComponents[1]
+	} else if https {
+		return "443"
+	} else {
+		return "80"
+	}
+}
+
 // Url provides the url connection string based on a Cloud DNS response
 func (cdr *cloudDnsResponse) Url(miniserverMac string) *url.URL {
 
 	var hostComponents []string
 	scheme := "ws"
+	var port string
 	if cdr.PortOpenHTTPS {
 		hostComponents = strings.Split(cdr.IPHTTPS, ":")
 		scheme = "wss"
+		port = getPortString(hostComponents, true)
 	} else if cdr.PortOpen {
 		hostComponents = strings.Split(cdr.IP, ":")
+		port = getPortString(hostComponents, false)
 	} else {
 		return nil
 	}
@@ -578,7 +591,7 @@ func (cdr *cloudDnsResponse) Url(miniserverMac string) *url.URL {
 	}
 
 	ipHost := strings.ReplaceAll(hostComponents[0], ".", "-")
-	return &url.URL{Scheme: scheme, Host: fmt.Sprintf("%s.%s.dyndns.%s:%s", ipHost, miniserverMac, cdr.Datacenter, hostComponents[1])}
+	return &url.URL{Scheme: scheme, Host: fmt.Sprintf("%s.%s.dyndns.%s:%s", ipHost, miniserverMac, cdr.Datacenter, port)}
 }
 
 func (l *websocketImpl) updateFromURL(u *url.URL) {
