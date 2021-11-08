@@ -199,6 +199,7 @@ type websocketImpl struct {
 	callbackChannel    chan *websocketResponse
 	socketMessage      chan []byte
 	socket             *websocket.Conn
+	isConnected        bool
 	disconnected       chan bool
 	stop               chan bool
 	hooks              map[string]func(events.Event)
@@ -238,6 +239,8 @@ SHA_256: "10.4.0.0"
 
 type LoxoneDownloadSocket interface {
 	Close()
+	Done() <-chan bool
+	IsConnected() bool
 	GetFile(filename string) ([]byte, error)
 }
 
@@ -252,6 +255,7 @@ type Loxone interface {
 	RegisterEvents() error
 	PumpEvents(stop <-chan bool)
 	GetConfig() (*Config, error)
+	IsConnected() bool
 }
 
 type websocketResponse struct {
@@ -525,6 +529,10 @@ func New(opts ...WebsocketOption) (Loxone, error) {
 	return loxone, nil
 }
 
+func (l *websocketImpl) IsConnected() bool {
+	return l.isConnected
+}
+
 // GetDownloadSocket clones the existing socket but without keepalive or timeout specifically to perform file downloads
 func (l *websocketImpl) GetDownloadSocket() (LoxoneDownloadSocket, error) {
 	// clone current socket but with no keepalive or timeout
@@ -685,6 +693,8 @@ func (l *websocketImpl) connect() error {
 		return err
 	}
 
+	l.isConnected = true
+
 	if l.registerEvents {
 		// handle this error?
 		_ = l.RegisterEvents()
@@ -720,7 +730,7 @@ func (l *websocketImpl) handleReconnect() {
 		case <-l.stop:
 			return
 		case <-l.disconnected:
-
+			l.isConnected = false
 			// if auto reconnect is disabled, close the stop channel and return immediately
 			if !l.autoReconnect {
 				close(l.stop)
