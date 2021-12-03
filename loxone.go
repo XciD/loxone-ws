@@ -243,6 +243,7 @@ type LoxoneDownloadSocket interface {
 	Close()
 	Done() <-chan bool
 	IsConnected() bool
+	ConnectionEvents() <-chan bool
 	GetFile(filename string) ([]byte, error)
 }
 
@@ -540,7 +541,7 @@ func (l *websocketImpl) IsConnected() bool {
 }
 
 func (l *websocketImpl) ConnectionEvents() <-chan bool {
-	return nil
+	return l.connectionEvents
 }
 
 // GetDownloadSocket clones the existing socket but without keepalive or timeout specifically to perform file downloads
