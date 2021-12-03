@@ -199,7 +199,9 @@ type websocketImpl struct {
 	callbackChannel    chan *websocketResponse
 	socketMessage      chan []byte
 	socket             *websocket.Conn
+	connectedMu        sync.RWMutex
 	isConnected        bool
+	connectionEvents   chan bool
 	disconnected       chan bool
 	stop               chan bool
 	hooks              map[string]func(events.Event)
@@ -256,6 +258,7 @@ type Loxone interface {
 	PumpEvents(stop <-chan bool)
 	GetConfig() (*Config, error)
 	IsConnected() bool
+	ConnectionEvents() <-chan bool
 }
 
 type websocketResponse struct {
@@ -472,16 +475,17 @@ func WithJWTToken(tokenString string) WebsocketOption {
 
 func newBase() *websocketImpl {
 	return &websocketImpl{
-		port:            80,
-		Events:          make(chan events.Event),
-		callbackChannel: make(chan *websocketResponse),
-		disconnected:    make(chan bool),
-		stop:            make(chan bool),
-		hooks:           make(map[string]func(events.Event)),
-		socketMessage:   make(chan []byte),
-		useJwt:          true,
-		useSHA256:       true,
-		httpTransport:   http.DefaultTransport.(*http.Transport).Clone(),
+		port:             80,
+		Events:           make(chan events.Event),
+		callbackChannel:  make(chan *websocketResponse),
+		connectionEvents: make(chan bool),
+		disconnected:     make(chan bool),
+		stop:             make(chan bool),
+		hooks:            make(map[string]func(events.Event)),
+		socketMessage:    make(chan []byte),
+		useJwt:           true,
+		useSHA256:        true,
+		httpTransport:    http.DefaultTransport.(*http.Transport).Clone(),
 	}
 }
 
@@ -530,7 +534,13 @@ func New(opts ...WebsocketOption) (Loxone, error) {
 }
 
 func (l *websocketImpl) IsConnected() bool {
+	l.connectedMu.RLock()
+	defer l.connectedMu.RUnlock()
 	return l.isConnected
+}
+
+func (l *websocketImpl) ConnectionEvents() <-chan bool {
+	return nil
 }
 
 // GetDownloadSocket clones the existing socket but without keepalive or timeout specifically to perform file downloads
@@ -693,7 +703,7 @@ func (l *websocketImpl) connect() error {
 		return err
 	}
 
-	l.isConnected = true
+	l.setConnected(true)
 
 	if l.registerEvents {
 		// handle this error?
@@ -730,7 +740,7 @@ func (l *websocketImpl) handleReconnect() {
 		case <-l.stop:
 			return
 		case <-l.disconnected:
-			l.isConnected = false
+			l.setConnected(false)
 			// if auto reconnect is disabled, close the stop channel and return immediately
 			if !l.autoReconnect {
 				close(l.stop)
@@ -761,6 +771,18 @@ func (l *websocketImpl) handleReconnect() {
 		}
 	}
 
+}
+
+func (l *websocketImpl) setConnected(connected bool) {
+	l.connectedMu.Lock()
+	l.isConnected = connected
+	l.connectedMu.Unlock()
+
+	// non blocking event update
+	select {
+	case l.connectionEvents <- connected:
+	default:
+	}
 }
 
 // Close closes the connection to the Miniserver
