@@ -189,20 +189,23 @@ type Category struct {
 
 // Loxone The loxone object exposed
 type websocketImpl struct {
-	host               string
-	port               uint16
-	user               string
-	password           string
-	encrypt            *encrypt
-	token              *token
-	Events             chan events.Event
-	callbackChannel    chan *websocketResponse
-	socketMessage      chan []byte
-	socket             *websocket.Conn
-	connectedMu        sync.RWMutex
-	isConnected        bool
-	connectionEvents   chan bool
+	host            string
+	port            uint16
+	user            string
+	password        string
+	encrypt         *encrypt
+	token           *token
+	Events          chan events.Event
+	callbackChannel chan *websocketResponse
+	socketMessage   chan []byte
+	socket          *websocket.Conn
+
+	connectedMu      sync.RWMutex
+	isConnected      bool
+	connectedHandler func(bool)
+
 	disconnected       chan bool
+	safeStop           sync.Once
 	stop               chan bool
 	hooks              map[string]func(events.Event)
 	registerEvents     bool
@@ -243,7 +246,7 @@ type LoxoneDownloadSocket interface {
 	Close()
 	Done() <-chan bool
 	IsConnected() bool
-	ConnectionEvents() <-chan bool
+	SetConnectedHandler(func(bool))
 	GetFile(filename string) ([]byte, error)
 }
 
@@ -259,7 +262,7 @@ type Loxone interface {
 	PumpEvents(stop <-chan bool)
 	GetConfig() (*Config, error)
 	IsConnected() bool
-	ConnectionEvents() <-chan bool
+	SetConnectedHandler(func(bool))
 }
 
 type websocketResponse struct {
@@ -476,17 +479,16 @@ func WithJWTToken(tokenString string) WebsocketOption {
 
 func newBase() *websocketImpl {
 	return &websocketImpl{
-		port:             80,
-		Events:           make(chan events.Event),
-		callbackChannel:  make(chan *websocketResponse),
-		connectionEvents: make(chan bool),
-		disconnected:     make(chan bool),
-		stop:             make(chan bool),
-		hooks:            make(map[string]func(events.Event)),
-		socketMessage:    make(chan []byte),
-		useJwt:           true,
-		useSHA256:        true,
-		httpTransport:    http.DefaultTransport.(*http.Transport).Clone(),
+		port:            80,
+		Events:          make(chan events.Event),
+		callbackChannel: make(chan *websocketResponse),
+		disconnected:    make(chan bool),
+		stop:            make(chan bool),
+		hooks:           make(map[string]func(events.Event)),
+		socketMessage:   make(chan []byte),
+		useJwt:          true,
+		useSHA256:       true,
+		httpTransport:   http.DefaultTransport.(*http.Transport).Clone(),
 	}
 }
 
@@ -494,6 +496,8 @@ func newBase() *websocketImpl {
 func New(opts ...WebsocketOption) (Loxone, error) {
 
 	loxone := newBase()
+
+	// normal (non-download) socket defaults
 	loxone.autoReconnect = true
 	loxone.reconnectTimeout = 30 * time.Second
 	loxone.keepaliveInterval = 2 * time.Second
@@ -540,8 +544,11 @@ func (l *websocketImpl) IsConnected() bool {
 	return l.isConnected
 }
 
-func (l *websocketImpl) ConnectionEvents() <-chan bool {
-	return l.connectionEvents
+func (l *websocketImpl) SetConnectedHandler(h func(bool)) {
+	l.connectedMu.Lock()
+	l.connectedHandler = h
+	l.connectedMu.Unlock()
+
 }
 
 // GetDownloadSocket clones the existing socket but without keepalive or timeout specifically to perform file downloads
@@ -777,20 +784,19 @@ func (l *websocketImpl) handleReconnect() {
 func (l *websocketImpl) setConnected(connected bool) {
 	l.connectedMu.Lock()
 	l.isConnected = connected
-	l.connectedMu.Unlock()
-
-	// non blocking event update
-	select {
-	case l.connectionEvents <- connected:
-	default:
+	if l.connectedHandler != nil {
+		l.connectedHandler(connected)
 	}
+	l.connectedMu.Unlock()
 }
 
 // Close closes the connection to the Miniserver
 func (l *websocketImpl) Close() {
-	close(l.stop)
-	_ = l.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-	_ = l.socket.Close()
+	l.safeStop.Do(func() {
+		close(l.stop)
+		_ = l.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		_ = l.socket.Close()
+	})
 }
 
 func (l *websocketImpl) write(messageType int, data []byte) error {
@@ -1189,6 +1195,11 @@ func (l *websocketImpl) handleMessages() {
 				} else if incomingData.Length == 0 && incomingData.EventType != events.EventTypeOutofservice && incomingData.EventType != events.EventTypeKeepalive {
 					log.Debug("received header telling 0 bytes payload - resolve request with null!")
 					// TODO sendOnBinaryMessage
+
+					if incomingData.EventType == events.EventTypeFile && !incomingData.Estimated {
+						l.callbackChannel <- &websocketResponse{data: []byte{}, responseType: incomingData.EventType}
+					}
+
 					incomingData = events.EmptyHeader
 				} else {
 					log.Tracef("Received header: %+v\n", incomingData)
@@ -1281,10 +1292,8 @@ func (e *encrypt) getEncryptedCmd(cmd string, encryptType encryptType) ([]byte, 
 		return []byte(cmd), nil
 	}
 
-	// at what point can we be certain the Miniserver is expecting the new salt
-	// do we need a valid command? any command even if it errors?
+	// TODO rotate salts
 
-	// TODO code next Salt
 	cmd = fmt.Sprintf(aesPayload, e.salt, cmd)
 	cipher, err := crypto.EncryptAES(cmd, e.key, e.iv)
 
