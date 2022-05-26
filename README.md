@@ -9,4 +9,4 @@
 TODO
   - Loxone DNS
   - Download Socket
-  - Version Check
+  - Version Check 
