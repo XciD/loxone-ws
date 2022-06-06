@@ -482,7 +482,7 @@ func newBase() *websocketImpl {
 		port:            80,
 		Events:          make(chan events.Event),
 		callbackChannel: make(chan *websocketResponse),
-		disconnected:    make(chan bool),
+		disconnected:    make(chan bool, 1), // buffered in case reconnectHandler is already done (on close for example)
 		stop:            make(chan bool),
 		hooks:           make(map[string]func(events.Event)),
 		socketMessage:   make(chan []byte),
@@ -1154,12 +1154,7 @@ func (l *websocketImpl) readPump() {
 				log.Error("Socket error:", err)
 			}
 
-			// if Close was called, or socket not fully open yet we don't want to send to a blocked channel
-			select {
-			case l.disconnected <- true:
-				log.Trace("Disconnect channel notified socket disconnected")
-			default:
-			}
+			l.disconnected <- true
 
 			return
 		}
