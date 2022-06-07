@@ -6,7 +6,6 @@
 [![codecov](https://codecov.io/gh/XciD/loxone-ws/branch/master/graph/badge.svg)](https://codecov.io/gh/XciD/loxone-ws)
 
 
-TODO
-  - Loxone DNS
-  - Download Socket
-  - Version Check 
+  - ~~Loxone DNS~~
+  - ~~Download Socket~~
+  - ~~Version Check~~

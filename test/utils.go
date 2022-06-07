@@ -24,6 +24,13 @@ func (l *FakeWebsocket) SendCommand(command string, class interface{}) (*loxone.
 	l.commands = append(l.commands, command)
 	return &loxone.Body{Code: 200}, nil
 }
+func (l *FakeWebsocket) SendEncryptedCommand(command string, class interface{}) (*loxone.Body, error) {
+	l.commands = append(l.commands, command)
+	return &loxone.Body{Code: 200}, nil
+}
+func (l *FakeWebsocket) GetFile(filename string) ([]byte, error) {
+	return nil, nil
+}
 
 func (l *FakeWebsocket) Close() {
 
@@ -33,7 +40,7 @@ func (l *FakeWebsocket) RegisterEvents() error {
 	return nil
 }
 
-func (l *FakeWebsocket) GetEvents() chan events.Event {
+func (l *FakeWebsocket) GetEvents() <-chan events.Event {
 	return nil
 }
 
